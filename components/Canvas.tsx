@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { DiagramElement, DiagramGroup, ToolType, Point, LineType, LineStyle } from '../types';
+import { DiagramElement, DiagramGroup, ToolType, Point, LineType, LineStyle, PortDirection } from '../types';
 import * as Icons from 'lucide-react';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 
@@ -31,37 +31,237 @@ const getPorts = (el: DiagramElement): Port[] => {
   ];
 };
 
+// Apply offset to path data based on line type (for manual arrow position adjustment)
+const applyOffsetToPath = (pathData: string, offsetX: number, offsetY: number, lineType: LineType): string => {
+  if (!offsetX && !offsetY) return pathData;
+  
+  // For STRAIGHT lines: translate entire line without changing shape
+  // offsetX and offsetY are already constrained to perpendicular direction in drag handler
+  if (lineType === LineType.STRAIGHT) {
+    const lineMatch = pathData.match(/M\s+([\d.-]+)\s+([\d.-]+)\s+L\s+([\d.-]+)\s+([\d.-]+)/);
+    if (lineMatch) {
+      const [, x1, y1, x2, y2] = lineMatch.map(Number);
+      // Simply translate both points by the offset (which is already perpendicular)
+      return `M ${x1 + offsetX} ${y1 + offsetY} L ${x2 + offsetX} ${y2 + offsetY}`;
+    }
+    return pathData;
+  }
+  
+  // For STEP lines: regenerate with custom midX and midY offset
+  if (lineType === LineType.STEP) {
+    // Try to extract start and end points from path
+    const parts = pathData.split(/\s+/);
+    const startX = parseFloat(parts[1]);
+    const startY = parseFloat(parts[2]);
+    // Find last L command for end point
+    const lastLIndex = pathData.lastIndexOf('L');
+    let endX = 0, endY = 0;
+    if (lastLIndex !== -1) {
+      const afterL = pathData.substring(lastLIndex + 1).trim().split(/\s+/);
+      endX = parseFloat(afterL[0]);
+      endY = parseFloat(afterL[1]);
+    } else {
+      return pathData;
+    }
+    
+    // For STEP lines:
+    // - offsetX: moves the vertical segment horizontally (midX offset)
+    // - offsetY: moves horizontal segments vertically (creates bend point)
+    return getRoundedStepPathWithOffset(startX, startY, endX, endY, offsetX, offsetY);
+  }
+  
+  // For CURVE lines: apply offset to control points
+  if (lineType === LineType.CURVE) {
+    const curveMatch = pathData.match(/M\s+([\d.-]+)\s+([\d.-]+)\s+C\s+([\d.-]+)\s+([\d.-]+),\s+([\d.-]+)\s+([\d.-]+),\s+([\d.-]+)\s+([\d.-]+)/);
+    if (curveMatch) {
+      const [, x1, y1, cp1x, cp1y, cp2x, cp2y, x2, y2] = curveMatch.map(Number);
+      // Apply offset to control points only, keep start and end points fixed
+      return `M ${x1} ${y1} C ${cp1x + offsetX} ${cp1y + offsetY}, ${cp2x + offsetX} ${cp2y + offsetY}, ${x2} ${y2}`;
+    }
+    return pathData;
+  }
+  
+  return pathData;
+};
+
+// Helper function to generate rounded step line path with custom midX and midY offset
+// 智能版：根据布局方向选择最佳路径模式
+const getRoundedStepPathWithOffset = (startX: number, startY: number, endX: number, endY: number, midXOffset: number, midYOffset: number = 0): string => {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const radius = 10;
+  
+  // 如果X坐标几乎相同（垂直线），使用直线
+  if (absDx < 5) {
+    return `M ${startX} ${startY} L ${endX} ${endY}`;
+  }
+  
+  // 如果Y坐标几乎相同（水平线），使用直线
+  if (absDy < 5) {
+    return `M ${startX} ${startY} L ${endX} ${endY}`;
+  }
+  
+  // STEP 线始终保持折线形状，不再根据比例转换为直线
+  // 如果用户想要直线，应该使用 STRAIGHT 类型
+  
+  // 判断主要方向：垂直布局还是水平布局
+  const isVerticalLayout = absDy > absDx;
+  
+  if (isVerticalLayout) {
+    // 垂直布局：先垂直-再水平-再垂直 (VHV 模式)
+    const baseMidY = (startY + endY) / 2;
+    const midY = baseMidY + midYOffset;
+    
+    const verticalDist1 = Math.abs(midY - startY);
+    const verticalDist2 = Math.abs(endY - midY);
+    const horizontalDist = Math.abs(endX - startX);
+    
+    const actualRadius = Math.min(radius, verticalDist1 * 0.45, verticalDist2 * 0.45, horizontalDist * 0.45);
+    
+    if (actualRadius < 3) {
+      return `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+    }
+    
+    const goingDown = dy > 0;
+    const goingRight = dx > 0;
+    
+    // First corner: 垂直线转水平线
+    const arc1StartY = goingDown ? midY - actualRadius : midY + actualRadius;
+    const arc1EndX = goingRight ? startX + actualRadius : startX - actualRadius;
+    
+    // Second corner: 水平线转垂直线
+    const arc2StartX = goingRight ? endX - actualRadius : endX + actualRadius;
+    const arc2EndY = goingDown ? midY + actualRadius : midY - actualRadius;
+    
+    // 修正 sweep 方向以获得外凸圆角
+    const sweep1 = (goingDown && goingRight) || (!goingDown && !goingRight) ? 1 : 0;
+    const sweep2 = (goingDown && goingRight) || (!goingDown && !goingRight) ? 1 : 0;
+    
+    return `M ${startX} ${startY} L ${startX} ${arc1StartY} A ${actualRadius} ${actualRadius} 0 0 ${sweep1} ${arc1EndX} ${midY} L ${arc2StartX} ${midY} A ${actualRadius} ${actualRadius} 0 0 ${sweep2} ${endX} ${arc2EndY} L ${endX} ${endY}`;
+  } else {
+    // 水平布局：先水平-再垂直-再水平 (HVH 模式)
+    const baseMidX = (startX + endX) / 2;
+    const midX = baseMidX + midXOffset;
+    
+    const horizontalDist1 = Math.abs(midX - startX);
+    const horizontalDist2 = Math.abs(endX - midX);
+    const verticalDist = Math.abs(endY - startY);
+    
+    const actualRadius = Math.min(radius, horizontalDist1 * 0.45, horizontalDist2 * 0.45, verticalDist * 0.45);
+    
+    if (actualRadius < 3) {
+      return `M ${startX} ${startY} L ${midX} ${startY} L ${midX} ${endY} L ${endX} ${endY}`;
+    }
+    
+    const goingDown = dy > 0;
+    const firstSegmentRight = midX > startX;
+    const secondSegmentRight = endX > midX;
+    
+    // First corner: 水平线转垂直线
+    const arc1StartX = firstSegmentRight ? midX - actualRadius : midX + actualRadius;
+    const arc1EndY = goingDown ? startY + actualRadius : startY - actualRadius;
+    
+    // Second corner: 垂直线转水平线
+    const arc2StartY = goingDown ? endY - actualRadius : endY + actualRadius;
+    const arc2EndX = secondSegmentRight ? midX + actualRadius : midX - actualRadius;
+    
+    // 修正 sweep 方向以获得外凸圆角
+    const sweep1 = (firstSegmentRight && goingDown) || (!firstSegmentRight && !goingDown) ? 0 : 1;
+    const sweep2 = (secondSegmentRight && goingDown) || (!secondSegmentRight && !goingDown) ? 1 : 0;
+    
+    return `M ${startX} ${startY} L ${arc1StartX} ${startY} A ${actualRadius} ${actualRadius} 0 0 ${sweep1} ${midX} ${arc1EndY} L ${midX} ${arc2StartY} A ${actualRadius} ${actualRadius} 0 0 ${sweep2} ${arc2EndX} ${endY} L ${endX} ${endY}`;
+  }
+};
+
+// Helper function to generate rounded step line path (飞书风格 - 外凸圆角)
+const getRoundedStepPath = (startX: number, startY: number, endX: number, endY: number): string => {
+  return getRoundedStepPathWithOffset(startX, startY, endX, endY, 0, 0);
+};
+
+// Helper function to select best port pair based on layout
+const selectBestPorts = (from: DiagramElement, to: DiagramElement): { fromPort: Port; toPort: Port } => {
+  const fromPorts = getPorts(from);
+  const toPorts = getPorts(to);
+  
+  // Calculate element centers for direction detection
+  const fromCenterX = from.x + (from.width || 0) / 2;
+  const fromCenterY = from.y + (from.height || 0) / 2;
+  const toCenterX = to.x + (to.width || 0) / 2;
+  const toCenterY = to.y + (to.height || 0) / 2;
+  
+  const dx = toCenterX - fromCenterX;
+  const dy = toCenterY - fromCenterY;
+  
+  // Determine primary direction based on layout
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  
+  let fromPort: Port = fromPorts[2]; // default bottom
+  let toPort: Port = toPorts[0];     // default top
+  
+  // Smart port selection based on relative position
+  if (absDy > absDx) {
+    // Vertical layout (top-down or bottom-up)
+    if (dy > 0) {
+      // from is above to: use bottom of from, top of to
+      fromPort = fromPorts[2]; // bottom
+      toPort = toPorts[0];     // top
+    } else {
+      // from is below to: use top of from, bottom of to
+      fromPort = fromPorts[0]; // top
+      toPort = toPorts[2];     // bottom
+    }
+  } else {
+    // Horizontal layout (left-right or right-left)
+    if (dx > 0) {
+      // from is left of to: use right of from, left of to
+      fromPort = fromPorts[1]; // right
+      toPort = toPorts[3];     // left
+    } else {
+      // from is right of to: use left of from, right of to
+      fromPort = fromPorts[3]; // left
+      toPort = toPorts[1];     // right
+    }
+  }
+  
+  // Fallback: if the smart selection results in a very long path, 
+  // use the closest port pair instead
+  const smartDist = Math.sqrt(Math.pow(fromPort.x - toPort.x, 2) + Math.pow(fromPort.y - toPort.y, 2));
+  let minDist = smartDist;
+  let bestFromPort = fromPort;
+  let bestToPort = toPort;
+  
+  // Check all port combinations, but prefer the smart selection
+  for (const fp of fromPorts) {
+    for (const tp of toPorts) {
+      const dist = Math.sqrt(Math.pow(fp.x - tp.x, 2) + Math.pow(fp.y - tp.y, 2));
+      // Only use closer port if it's significantly closer (20% threshold)
+      if (dist < minDist * 0.8) {
+        minDist = dist;
+        bestFromPort = fp;
+        bestToPort = tp;
+      }
+    }
+  }
+  
+  return { fromPort: bestFromPort, toPort: bestToPort };
+};
+
 const getSmartPath = (
   from: DiagramElement, 
   to: DiagramElement, 
   lineType: LineType
 ): string => {
-  const fromPorts = getPorts(from);
-  const toPorts = getPorts(to);
-
-  // Find the pair of ports with minimum distance
-  let minDist = Infinity;
-  let start: Port = fromPorts[2]; // default bottom
-  let end: Port = toPorts[0];     // default top
-
-  for (const fp of fromPorts) {
-    for (const tp of toPorts) {
-      const dist = Math.sqrt(Math.pow(fp.x - tp.x, 2) + Math.pow(fp.y - tp.y, 2));
-      if (dist < minDist) {
-        minDist = dist;
-        start = fp;
-        end = tp;
-      }
-    }
-  }
+  const { fromPort: start, toPort: end } = selectBestPorts(from, to);
 
   if (lineType === LineType.STRAIGHT) {
     return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
   }
 
   if (lineType === LineType.STEP) {
-    const midX = (start.x + end.x) / 2;
-    return `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`;
+    return getRoundedStepPath(start.x, start.y, end.x, end.y);
   }
 
   // CURVE (Bezier)
@@ -133,6 +333,12 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Creating arrow from connection point
   const [creatingArrowFrom, setCreatingArrowFrom] = useState<{ elementId: string; port: 'top' | 'right' | 'bottom' | 'left'; point: Point } | null>(null);
   const [tempArrowEnd, setTempArrowEnd] = useState<Point | null>(null);
+  
+  // Track which segment of step line is being dragged
+  const [draggingStepSegment, setDraggingStepSegment] = useState<'horizontal' | 'vertical' | null>(null);
+  
+  // Track label dragging on arrow
+  const [draggingLabel, setDraggingLabel] = useState<string | null>(null);
   
   // Viewport State
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
@@ -280,10 +486,11 @@ export const Canvas: React.FC<CanvasProps> = ({
   };
 
   // Check if point is near an element (for connection snapping)
-  const findNearestElement = (pos: Point, useExactPosition: boolean = false): { id: string; point: Point } | null => {
-    let nearest: { id: string; point: Point; dist: number } | null = null;
+  const findNearestElement = (pos: Point, useExactPosition: boolean = false): { id: string; point: Point; port?: PortDirection } | null => {
+    let nearest: { id: string; point: Point; dist: number; port?: PortDirection } | null = null;
     const snapDistance = 50;
     const exactSnapDistance = 30; // Increased from 15 to 30 for easier edge detection
+    const portDirections: PortDirection[] = ['top', 'right', 'bottom', 'left'];
 
     elements.forEach(el => {
       if (el.type === ToolType.ARROW || el.id === selectedElementId) return;
@@ -300,27 +507,32 @@ export const Canvas: React.FC<CanvasProps> = ({
       
       if (isInside || isNearElement || !useExactPosition) {
         const ports = getPorts(el);
-        ports.forEach(port => {
+        ports.forEach((port, index) => {
           const dist = Math.sqrt(Math.pow(pos.x - port.x, 2) + Math.pow(pos.y - port.y, 2));
           const threshold = useExactPosition ? exactSnapDistance : snapDistance;
           if (dist < threshold && (!nearest || dist < nearest.dist)) {
-            nearest = { id: el.id, point: port, dist };
+            nearest = { id: el.id, point: port, dist, port: portDirections[index] };
           }
         });
         
-        // If inside element but not close to any port, use the element itself
+        // If inside element but not close to any port, find the nearest port
         if (isInside && !nearest && useExactPosition) {
-          const centerX = el.x + w / 2;
-          const centerY = el.y + h / 2;
-          const dist = Math.sqrt(Math.pow(pos.x - centerX, 2) + Math.pow(pos.y - centerY, 2));
-          if (!nearest || dist < nearest.dist) {
-            nearest = { id: el.id, point: { x: centerX, y: centerY }, dist };
-          }
+          const ports = getPorts(el);
+          let minDist = Infinity;
+          let nearestPortIndex = 0;
+          ports.forEach((port, index) => {
+            const dist = Math.sqrt(Math.pow(pos.x - port.x, 2) + Math.pow(pos.y - port.y, 2));
+            if (dist < minDist) {
+              minDist = dist;
+              nearestPortIndex = index;
+            }
+          });
+          nearest = { id: el.id, point: ports[nearestPortIndex], dist: minDist, port: portDirections[nearestPortIndex] };
         }
       }
     });
 
-    return nearest ? { id: nearest.id, point: nearest.point } : null;
+    return nearest ? { id: nearest.id, point: nearest.point, port: nearest.port } : null;
   };
 
   const handleElementMouseDown = (e: React.MouseEvent, elementId: string) => {
@@ -362,12 +574,44 @@ export const Canvas: React.FC<CanvasProps> = ({
         setDraggingConnectionPoint('from');
         setTempConnectionPoint(pos);
         setIsDrawing(true);
+        setDraggingStepSegment(null);
         return;
       } else if (toDist < handleRadius) {
         setDraggingConnectionPoint('to');
         setTempConnectionPoint(pos);
         setIsDrawing(true);
+        setDraggingStepSegment(null);
         return;
+      }
+      
+      // For step lines, detect which segment is clicked
+      if (element.lineType === LineType.STEP && fromPoint && toPoint) {
+        // Calculate step line segments
+        const midX = (fromPoint.x + toPoint.x) / 2;
+        const midY1 = fromPoint.y;
+        const midY2 = toPoint.y;
+        
+        // First horizontal segment: from (fromPoint.x, fromPoint.y) to (midX, fromPoint.y)
+        const distToFirstHoriz = Math.abs(pos.y - fromPoint.y);
+        const isOnFirstHoriz = pos.x >= Math.min(fromPoint.x, midX) && pos.x <= Math.max(fromPoint.x, midX) && distToFirstHoriz < 20;
+        
+        // Vertical segment: from (midX, fromPoint.y) to (midX, toPoint.y)
+        const distToVert = Math.abs(pos.x - midX);
+        const isOnVert = pos.y >= Math.min(fromPoint.y, toPoint.y) && pos.y <= Math.max(fromPoint.y, toPoint.y) && distToVert < 20;
+        
+        // Second horizontal segment: from (midX, toPoint.y) to (toPoint.x, toPoint.y)
+        const distToSecondHoriz = Math.abs(pos.y - toPoint.y);
+        const isOnSecondHoriz = pos.x >= Math.min(midX, toPoint.x) && pos.x <= Math.max(midX, toPoint.x) && distToSecondHoriz < 20;
+        
+        if (isOnFirstHoriz || isOnSecondHoriz) {
+          setDraggingStepSegment('horizontal');
+        } else if (isOnVert) {
+          setDraggingStepSegment('vertical');
+        } else {
+          setDraggingStepSegment(null);
+        }
+      } else {
+        setDraggingStepSegment(null);
       }
     }
     
@@ -434,7 +678,35 @@ export const Canvas: React.FC<CanvasProps> = ({
       setSelectedGroupId(null); // Clear group selection when selecting element
     }
     setDragStart(pos);
-    setDragOffset({ x: pos.x - element.x, y: pos.y - element.y });
+    
+    // For arrows connected to elements, calculate offset from center of arrow
+    if (element.type === ToolType.ARROW && (element.fromId || element.toId)) {
+      // Calculate arrow center point
+      let centerX = 0, centerY = 0;
+      if (element.fromId && element.toId) {
+        const fromNode = nodeMap.get(element.fromId);
+        const toNode = nodeMap.get(element.toId);
+        if (fromNode && toNode) {
+          const { fromPort: bestFrom, toPort: bestTo } = selectBestPorts(fromNode as DiagramElement, toNode as DiagramElement);
+          centerX = (bestFrom.x + bestTo.x) / 2;
+          centerY = (bestFrom.y + bestTo.y) / 2;
+        }
+      } else {
+        centerX = (element.x + (element.endX || element.x)) / 2;
+        centerY = (element.y + (element.endY || element.y)) / 2;
+      }
+      
+      // Calculate offset from current position
+      const currentOffsetX = element.offsetX || 0;
+      const currentOffsetY = element.offsetY || 0;
+      setDragOffset({ 
+        x: pos.x - (centerX + currentOffsetX), 
+        y: pos.y - (centerY + currentOffsetY) 
+      });
+    } else {
+      setDragOffset({ x: pos.x - element.x, y: pos.y - element.y });
+    }
+    
     setIsDrawing(true);
     setHasMoved(false);
   };
@@ -455,8 +727,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (creatingArrowFrom) {
       setTempArrowEnd(pos);
       
-      // Check for snapping to nearby elements
-      const nearest = findNearestElement(pos);
+      // Check for snapping to nearby elements - use exact positioning for better detection
+      const nearest = findNearestElement(pos, true);
       setHoveredElementId(nearest?.id || null);
       
       return;
@@ -466,8 +738,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (draggingConnectionPoint && selectedElementId) {
       setTempConnectionPoint(pos);
       
-      // Check for snapping to nearby elements
-      const nearest = findNearestElement(pos);
+      // Check for snapping to nearby elements - use exact positioning for better detection
+      const nearest = findNearestElement(pos, true);
       setHoveredElementId(nearest?.id || null);
       
       return;
@@ -567,7 +839,47 @@ export const Canvas: React.FC<CanvasProps> = ({
       setHasMoved(true);
     }
 
-    if (selectedTool === ToolType.SELECT && selectedElementId && !resizingHandle) {
+    // Handle label dragging on arrow
+    if (draggingLabel) {
+      const arrowElement = elements.find(el => el.id === draggingLabel);
+      if (arrowElement && arrowElement.type === ToolType.ARROW) {
+        // 计算起点和终点
+        let fromPoint = { x: arrowElement.x, y: arrowElement.y };
+        let toPoint = { x: arrowElement.endX || arrowElement.x, y: arrowElement.endY || arrowElement.y };
+        
+        if (arrowElement.fromId && arrowElement.toId) {
+          const fromNode = nodeMap.get(arrowElement.fromId);
+          const toNode = nodeMap.get(arrowElement.toId);
+          if (fromNode && toNode) {
+            const { fromPort, toPort } = selectBestPorts(fromNode as DiagramElement, toNode as DiagramElement);
+            fromPoint = fromPort;
+            toPoint = toPort;
+          }
+        }
+        
+        // 计算鼠标位置在线上的投影位置（t 值，0-1）
+        const lineVecX = toPoint.x - fromPoint.x;
+        const lineVecY = toPoint.y - fromPoint.y;
+        const lineLenSq = lineVecX * lineVecX + lineVecY * lineVecY;
+        
+        if (lineLenSq > 0) {
+          const mouseDiffX = pos.x - fromPoint.x;
+          const mouseDiffY = pos.y - fromPoint.y;
+          let t = (mouseDiffX * lineVecX + mouseDiffY * lineVecY) / lineLenSq;
+          // 限制 t 在 0.1 到 0.9 之间，不让标签太靠近端点
+          t = Math.max(0.1, Math.min(0.9, t));
+          
+          setElements(prev => prev.map(el => 
+            el.id === draggingLabel 
+              ? { ...el, labelPosition: t }
+              : el
+          ));
+        }
+      }
+      return;
+    }
+
+    if (selectedTool === ToolType.SELECT && selectedElementId && !resizingHandle && !draggingConnectionPoint) {
       // Check if dragging element into a group
       const groupIdAtPoint = findGroupAtPoint(pos);
       const currentElement = elements.find(el => el.id === selectedElementId);
@@ -577,12 +889,96 @@ export const Canvas: React.FC<CanvasProps> = ({
           const updates: Partial<DiagramElement> = {};
           
           if (el.type === ToolType.ARROW) {
-             const dx = pos.x - dragStart.x;
-             const dy = pos.y - dragStart.y;
-             updates.x = el.x + dx;
-             updates.y = el.y + dy;
-             updates.endX = (el.endX || 0) + dx;
-             updates.endY = (el.endY || 0) + dy;
+            // Handle arrow dragging - either connected arrows with offset or segment dragging
+            if ((el.fromId || el.toId) && (dragOffset || draggingStepSegment)) {
+              // Calculate arrow center point and direction
+              let centerX = 0, centerY = 0;
+              let fromPoint: Point | null = null;
+              let toPoint: Point | null = null;
+              
+              if (el.fromId && el.toId) {
+                const fromNode = nodeMap.get(el.fromId);
+                const toNode = nodeMap.get(el.toId);
+                if (fromNode && toNode) {
+                  const { fromPort: bestFrom, toPort: bestTo } = selectBestPorts(fromNode as DiagramElement, toNode as DiagramElement);
+                  fromPoint = bestFrom;
+                  toPoint = bestTo;
+                  centerX = (bestFrom.x + bestTo.x) / 2;
+                  centerY = (bestFrom.y + bestTo.y) / 2;
+                }
+              } else {
+                fromPoint = { x: el.x, y: el.y };
+                toPoint = { x: el.endX || el.x, y: el.endY || el.y };
+                centerX = (el.x + (el.endX || el.x)) / 2;
+                centerY = (el.y + (el.endY || el.y)) / 2;
+              }
+              
+              // Apply constraints based on line type
+              const lineType = el.lineType || LineType.STRAIGHT;
+              
+              // For step lines with segment dragging, use incremental offset
+              if (lineType === LineType.STEP && draggingStepSegment) {
+                // Use dragStart if available, otherwise initialize it
+                const startPos = dragStart || pos;
+                if (!dragStart) {
+                  setDragStart(pos);
+                }
+                
+                if (draggingStepSegment === 'horizontal') {
+                  // Dragging horizontal segment: allow vertical movement
+                  const deltaY = pos.y - startPos.y;
+                  const currentOffsetY = el.offsetY || 0;
+                  updates.offsetX = el.offsetX || 0; // Keep existing offsetX
+                  updates.offsetY = currentOffsetY + deltaY;
+                  setDragStart(pos);
+                } else if (draggingStepSegment === 'vertical') {
+                  // Dragging vertical segment: only allow horizontal movement
+                  const deltaX = pos.x - startPos.x;
+                  const currentOffsetX = el.offsetX || 0;
+                  updates.offsetX = currentOffsetX + deltaX;
+                  updates.offsetY = el.offsetY || 0; // Keep existing offsetY
+                  setDragStart(pos);
+                }
+              } else if (dragOffset) {
+                // Calculate raw offset for other drag operations
+                const rawOffsetX = pos.x - centerX - dragOffset.x;
+                const rawOffsetY = pos.y - centerY - dragOffset.y;
+                
+                if (lineType === LineType.STRAIGHT && fromPoint && toPoint) {
+                  // For straight lines: only allow perpendicular movement
+                  const dx = toPoint.x - fromPoint.x;
+                  const dy = toPoint.y - fromPoint.y;
+                  const len = Math.sqrt(dx * dx + dy * dy);
+                  if (len > 0) {
+                    // Perpendicular direction
+                    const perpX = -dy / len;
+                    const perpY = dx / len;
+                    // Project offset onto perpendicular direction
+                    const projOffset = rawOffsetX * perpX + rawOffsetY * perpY;
+                    updates.offsetX = perpX * projOffset;
+                    updates.offsetY = perpY * projOffset;
+                  } else {
+                    updates.offsetX = rawOffsetX;
+                    updates.offsetY = rawOffsetY;
+                  }
+                } else if (lineType === LineType.CURVE) {
+                  // For curves: allow free movement
+                  updates.offsetX = rawOffsetX;
+                  updates.offsetY = rawOffsetY;
+                } else {
+                  updates.offsetX = rawOffsetX;
+                  updates.offsetY = rawOffsetY;
+                }
+              }
+            } else {
+              // For unconnected arrows, update position normally
+              const dx = pos.x - dragStart.x;
+              const dy = pos.y - dragStart.y;
+              updates.x = el.x + dx;
+              updates.y = el.y + dy;
+              updates.endX = (el.endX || 0) + dx;
+              updates.endY = (el.endY || 0) + dy;
+            }
           } else {
             updates.x = pos.x - (dragOffset?.x || 0);
             updates.y = pos.y - (dragOffset?.y || 0);
@@ -639,11 +1035,28 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (creatingArrowFrom && tempArrowEnd) {
       const fromElement = elements.find(el => el.id === creatingArrowFrom.elementId);
       if (fromElement) {
+        // Calculate distance between start and end points
+        const dx = tempArrowEnd.x - creatingArrowFrom.point.x;
+        const dy = tempArrowEnd.y - creatingArrowFrom.point.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Minimum distance threshold: at least 20 pixels
+        const MIN_ARROW_DISTANCE = 20;
+        
+        if (distance < MIN_ARROW_DISTANCE) {
+          // Distance too short, cancel arrow creation
+          setCreatingArrowFrom(null);
+          setTempArrowEnd(null);
+          setHoveredElementId(null);
+          return;
+        }
+        
         // Check if user dragged to an element (within bounds or very close to port)
         const nearest = findNearestElement(tempArrowEnd, true);
         
         // Don't connect to the same element
         const toId = nearest && nearest.id !== creatingArrowFrom.elementId ? nearest.id : undefined;
+        const toPort = toId ? nearest?.port : undefined;
         
         // If connected to an element (toId exists), don't set endX/endY - use smart anchors
         // If not connected, use manual coordinates
@@ -655,11 +1068,13 @@ export const Canvas: React.FC<CanvasProps> = ({
           endX: toId ? undefined : tempArrowEnd.x, // Only set if not connected to element
           endY: toId ? undefined : tempArrowEnd.y, // Only set if not connected to element
           fromId: creatingArrowFrom.elementId,
+          fromPort: creatingArrowFrom.port as PortDirection, // 记录起始端口，实现吸附
           toId: toId, // Set toId if dragged to an element
+          toPort: toPort, // 记录目标端口，实现吸附
           strokeColor: '#94a3b8',
           fillColor: 'transparent',
-          strokeWidth: 2,
-          lineType: LineType.STRAIGHT,
+          strokeWidth: 2.5,
+          lineType: LineType.STEP, // 默认使用 STEP 类型
           lineStyle: LineStyle.SOLID,
           markerEnd: true
         };
@@ -677,7 +1092,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (draggingConnectionPoint && selectedElementId && tempConnectionPoint) {
       const arrowElement = elements.find(el => el.id === selectedElementId);
       if (arrowElement && arrowElement.type === ToolType.ARROW) {
-        const nearest = findNearestElement(tempConnectionPoint);
+        const nearest = findNearestElement(tempConnectionPoint, true);
         
         if (draggingConnectionPoint === 'from') {
           // First check if dragging to the same element (by checking bounds)
@@ -696,91 +1111,41 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
           
           if (isSameElement && arrowElement.fromId) {
-            // Dragging to same element - always use user's actual position
-            onHistorySave();
-            setElements(prev => prev.map(el => 
-              el.id === selectedElementId 
-                ? { ...el, fromId: arrowElement.fromId, x: tempConnectionPoint!.x, y: tempConnectionPoint!.y }
-                : el
-            ));
-          } else if (nearest) {
-            // Dragging to different element - check which port area user is targeting
-            const fromNode = nodeMap.get(nearest.id) as DiagramElement | undefined;
+            // Dragging to same element - find nearest port for snapping
+            const fromNode = nodeMap.get(arrowElement.fromId) as DiagramElement | undefined;
             if (fromNode) {
               const ports = getPorts(fromNode);
-              const w = fromNode.width || 0;
-              const h = fromNode.height || 0;
-              
-              // Check which region of the element the user is targeting
-              const relX = tempConnectionPoint!.x - fromNode.x;
-              const relY = tempConnectionPoint!.y - fromNode.y;
-              const portThreshold = 30; // Increased threshold for easier snapping
-              
-              let targetPort: Point | null = null;
-              
-              // Check if in top region (top 30% of element)
-              if (relY < h * 0.3) {
-                targetPort = ports[0]; // Top port
-              }
-              // Check if in bottom region (bottom 30% of element)
-              else if (relY > h * 0.7) {
-                targetPort = ports[2]; // Bottom port
-              }
-              // Check if in left region (left 30% of element)
-              else if (relX < w * 0.3) {
-                targetPort = ports[3]; // Left port
-              }
-              // Check if in right region (right 30% of element)
-              else if (relX > w * 0.7) {
-                targetPort = ports[1]; // Right port
-              }
-              
-              // Also check if very close to any port
-              let closestPort: Point | null = null;
+              const portDirs: PortDirection[] = ['top', 'right', 'bottom', 'left'];
               let minDist = Infinity;
-              ports.forEach(port => {
+              let selectedPortIndex = 0;
+              ports.forEach((port, index) => {
                 const dist = Math.sqrt(Math.pow(tempConnectionPoint!.x - port.x, 2) + Math.pow(tempConnectionPoint!.y - port.y, 2));
-                if (dist < portThreshold && dist < minDist) {
+                if (dist < minDist) {
                   minDist = dist;
-                  closestPort = port;
+                  selectedPortIndex = index;
                 }
               });
-              
-              // Prefer region-based port, but use closest if very close
-              const finalPort = closestPort && minDist < 15 ? closestPort : targetPort;
-              
-              if (finalPort) {
-                // Use smart connection with specific port
-                onHistorySave();
-                setElements(prev => prev.map(el => 
-                  el.id === selectedElementId 
-                    ? { ...el, fromId: nearest.id, x: finalPort.x, y: finalPort.y }
-                    : el
-                ));
-              } else {
-                // On element but not in port region - use user's position
-                onHistorySave();
-                setElements(prev => prev.map(el => 
-                  el.id === selectedElementId 
-                    ? { ...el, fromId: nearest.id, x: tempConnectionPoint!.x, y: tempConnectionPoint!.y }
-                    : el
-                ));
-              }
-            } else {
-              // Fallback - use smart connection
               onHistorySave();
               setElements(prev => prev.map(el => 
                 el.id === selectedElementId 
-                  ? { ...el, fromId: nearest.id, x: undefined, y: undefined }
+                  ? { ...el, fromId: arrowElement.fromId, fromPort: portDirs[selectedPortIndex], x: undefined, y: undefined, offsetX: undefined, offsetY: undefined }
                   : el
               ));
             }
-          } else {
-            // Use manual coordinates - clear fromId
+          } else if (nearest) {
+            // Dragging to different element - use nearest port
             onHistorySave();
             setElements(prev => prev.map(el => 
               el.id === selectedElementId 
-                ? { ...el, x: tempConnectionPoint!.x, y: tempConnectionPoint!.y, fromId: undefined }
+                ? { ...el, fromId: nearest.id, fromPort: nearest.port, x: undefined, y: undefined, offsetX: undefined, offsetY: undefined }
+                : el
+            ));
+          } else {
+            // Use manual coordinates - clear fromId and fromPort
+            onHistorySave();
+            setElements(prev => prev.map(el => 
+              el.id === selectedElementId 
+                ? { ...el, x: tempConnectionPoint!.x, y: tempConnectionPoint!.y, fromId: undefined, fromPort: undefined, offsetX: undefined, offsetY: undefined }
                 : el
             ));
           }
@@ -802,91 +1167,41 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
           
           if (isSameElement && arrowElement.toId) {
-            // Dragging to same element - always use user's actual position
-            onHistorySave();
-            setElements(prev => prev.map(el => 
-              el.id === selectedElementId 
-                ? { ...el, toId: arrowElement.toId, endX: tempConnectionPoint!.x, endY: tempConnectionPoint!.y }
-                : el
-            ));
-          } else if (nearest) {
-            // Dragging to different element - check which port area user is targeting
-            const toNode = nodeMap.get(nearest.id) as DiagramElement | undefined;
+            // Dragging to same element - find nearest port for snapping
+            const toNode = nodeMap.get(arrowElement.toId) as DiagramElement | undefined;
             if (toNode) {
               const ports = getPorts(toNode);
-              const w = toNode.width || 0;
-              const h = toNode.height || 0;
-              
-              // Check which region of the element the user is targeting
-              const relX = tempConnectionPoint!.x - toNode.x;
-              const relY = tempConnectionPoint!.y - toNode.y;
-              const portThreshold = 30; // Increased threshold for easier snapping
-              
-              let targetPort: Point | null = null;
-              
-              // Check if in top region (top 30% of element)
-              if (relY < h * 0.3) {
-                targetPort = ports[0]; // Top port
-              }
-              // Check if in bottom region (bottom 30% of element)
-              else if (relY > h * 0.7) {
-                targetPort = ports[2]; // Bottom port
-              }
-              // Check if in left region (left 30% of element)
-              else if (relX < w * 0.3) {
-                targetPort = ports[3]; // Left port
-              }
-              // Check if in right region (right 30% of element)
-              else if (relX > w * 0.7) {
-                targetPort = ports[1]; // Right port
-              }
-              
-              // Also check if very close to any port
-              let closestPort: Point | null = null;
+              const portDirs: PortDirection[] = ['top', 'right', 'bottom', 'left'];
               let minDist = Infinity;
-              ports.forEach(port => {
+              let selectedPortIndex = 0;
+              ports.forEach((port, index) => {
                 const dist = Math.sqrt(Math.pow(tempConnectionPoint!.x - port.x, 2) + Math.pow(tempConnectionPoint!.y - port.y, 2));
-                if (dist < portThreshold && dist < minDist) {
+                if (dist < minDist) {
                   minDist = dist;
-                  closestPort = port;
+                  selectedPortIndex = index;
                 }
               });
-              
-              // Prefer region-based port, but use closest if very close
-              const finalPort = closestPort && minDist < 15 ? closestPort : targetPort;
-              
-              if (finalPort) {
-                // Use smart connection with specific port
-                onHistorySave();
-                setElements(prev => prev.map(el => 
-                  el.id === selectedElementId 
-                    ? { ...el, toId: nearest.id, endX: finalPort.x, endY: finalPort.y }
-                    : el
-                ));
-              } else {
-                // On element but not in port region - use user's position
-                onHistorySave();
-                setElements(prev => prev.map(el => 
-                  el.id === selectedElementId 
-                    ? { ...el, toId: nearest.id, endX: tempConnectionPoint!.x, endY: tempConnectionPoint!.y }
-                    : el
-                ));
-              }
-            } else {
-              // Fallback - use smart connection
               onHistorySave();
               setElements(prev => prev.map(el => 
                 el.id === selectedElementId 
-                  ? { ...el, toId: nearest.id, endX: undefined, endY: undefined }
+                  ? { ...el, toId: arrowElement.toId, toPort: portDirs[selectedPortIndex], endX: undefined, endY: undefined, offsetX: undefined, offsetY: undefined }
                   : el
               ));
             }
-          } else {
-            // Use manual coordinates - clear toId
+          } else if (nearest) {
+            // Dragging to different element - use nearest port
             onHistorySave();
             setElements(prev => prev.map(el => 
               el.id === selectedElementId 
-                ? { ...el, endX: tempConnectionPoint!.x, endY: tempConnectionPoint!.y, toId: undefined }
+                ? { ...el, toId: nearest.id, toPort: nearest.port, endX: undefined, endY: undefined, offsetX: undefined, offsetY: undefined }
+                : el
+            ));
+          } else {
+            // Use manual coordinates - clear toId and toPort
+            onHistorySave();
+            setElements(prev => prev.map(el => 
+              el.id === selectedElementId 
+                ? { ...el, endX: tempConnectionPoint!.x, endY: tempConnectionPoint!.y, toId: undefined, toPort: undefined, offsetX: undefined, offsetY: undefined }
                 : el
             ));
           }
@@ -916,6 +1231,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     setLastMousePos(null);
     setCurrentElementId(null);
     setHasMoved(false);
+    setDraggingStepSegment(null);
+    setDraggingLabel(null);
     
     if (selectedTool !== ToolType.SELECT) {
       setSelectedTool(ToolType.SELECT);
@@ -1023,7 +1340,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             <path d="M9,0 L9,6 L0,3 z" fill="#94a3b8" />
           </marker>
            <marker id="arrow-end-selected" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="#2563eb" />
+            <path d="M0,0 L0,6 L9,3 z" fill="#1890ff" />
           </marker>
           <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
             <feDropShadow dx="2" dy="2" stdDeviation="3" floodColor="#000000" floodOpacity="0.1"/>
@@ -1042,7 +1359,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                   width={group.width}
                   height={group.height}
                   fill={group.fillColor}
-                  stroke={isSelected ? '#2563eb' : group.strokeColor}
+                  stroke={isSelected ? '#1890ff' : group.strokeColor}
                   strokeWidth={isSelected ? group.strokeWidth! + 1 : group.strokeWidth}
                   strokeDasharray={group.strokeDasharray}
                   rx={8}
@@ -1092,7 +1409,7 @@ export const Canvas: React.FC<CanvasProps> = ({
               />
               {/* Hover indicator for snap target */}
               {hoveredElementId && tempArrowEnd && (() => {
-                const nearest = findNearestElement(tempArrowEnd);
+                const nearest = findNearestElement(tempArrowEnd, true);
                 if (nearest && nearest.id === hoveredElementId) {
                   return (
                     <circle
@@ -1127,53 +1444,80 @@ export const Canvas: React.FC<CanvasProps> = ({
                  const toNode = nodeMap.get(el.toId);
                  
                  if (fromNode && toNode) {
-                   // Use smart path algorithm
-                   pathData = getSmartPath(fromNode as DiagramElement, toNode as DiagramElement, el.lineType || LineType.STRAIGHT);
-                   
-                   // Calculate the same ports that getSmartPath uses
                    const fromPorts = getPorts(fromNode as DiagramElement);
                    const toPorts = getPorts(toNode as DiagramElement);
+                   const portIndexMap: Record<PortDirection, number> = { top: 0, right: 1, bottom: 2, left: 3 };
                    
-                   let minDist = Infinity;
-                   let bestFrom = fromPorts[2];
-                   let bestTo = toPorts[0];
-                   for (const fp of fromPorts) {
-                     for (const tp of toPorts) {
-                       const dist = Math.sqrt(Math.pow(fp.x - tp.x, 2) + Math.pow(fp.y - tp.y, 2));
-                       if (dist < minDist) {
-                         minDist = dist;
-                         bestFrom = fp;
-                         bestTo = tp;
-                       }
-                     }
+                   // 使用记录的端口方向（吸附功能）
+                   if (el.fromPort) {
+                     fromPoint = fromPorts[portIndexMap[el.fromPort]];
+                   } else {
+                     // Fallback: use smart selection
+                     const { fromPort } = selectBestPorts(fromNode as DiagramElement, toNode as DiagramElement);
+                     fromPoint = fromPort;
                    }
                    
-                   fromPoint = bestFrom;
-                   toPoint = bestTo;
+                   if (el.toPort) {
+                     toPoint = toPorts[portIndexMap[el.toPort]];
+                   } else {
+                     // Fallback: use smart selection
+                     const { toPort } = selectBestPorts(fromNode as DiagramElement, toNode as DiagramElement);
+                     toPoint = toPort;
+                   }
+                   
+                   // Generate path based on line type
+                   if (el.lineType === LineType.STRAIGHT) {
+                     pathData = `M ${fromPoint.x} ${fromPoint.y} L ${toPoint.x} ${toPoint.y}`;
+                   } else if (el.lineType === LineType.STEP) {
+                     pathData = getRoundedStepPath(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y);
+                   } else {
+                     // CURVE
+                     const dist = Math.sqrt(Math.pow(fromPoint.x - toPoint.x, 2) + Math.pow(fromPoint.y - toPoint.y, 2));
+                     const controlDist = Math.min(dist * 0.5, 150);
+                     const dx = toPoint.x - fromPoint.x;
+                     const dy = toPoint.y - fromPoint.y;
+                     const angle = Math.atan2(dy, dx);
+                     const cp1x = fromPoint.x + Math.cos(angle) * controlDist;
+                     const cp1y = fromPoint.y + Math.sin(angle) * controlDist;
+                     const cp2x = toPoint.x - Math.cos(angle) * controlDist;
+                     const cp2y = toPoint.y - Math.sin(angle) * controlDist;
+                     pathData = `M ${fromPoint.x} ${fromPoint.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${toPoint.x} ${toPoint.y}`;
+                   }
                  }
                } else if (el.fromId && !el.toId) {
-                 // Connected from element but not to element - use smart port on from, manual end
+                 // Connected from element but not to element
                  const fromNode = nodeMap.get(el.fromId);
                  if (fromNode) {
-                   const fromPorts = getPorts(fromNode as DiagramElement);
-                   let bestFrom = fromPorts[2];
-                   let minDist = Infinity;
-                   for (const fp of fromPorts) {
-                     const dist = Math.sqrt(Math.pow(fp.x - el.x, 2) + Math.pow(fp.y - el.y, 2));
-                     if (dist < minDist) {
-                       minDist = dist;
-                       bestFrom = fp;
+                   toPoint = { x: el.endX || el.x, y: el.endY || el.y };
+                   
+                   const fromNodeEl = fromNode as DiagramElement;
+                   const fromPorts = getPorts(fromNodeEl);
+                   const portIndexMap: Record<PortDirection, number> = { top: 0, right: 1, bottom: 2, left: 3 };
+                   
+                   // 使用记录的端口方向（吸附功能）
+                   if (el.fromPort) {
+                     fromPoint = fromPorts[portIndexMap[el.fromPort]];
+                   } else {
+                     // Fallback: 根据 toPoint 位置自动选择
+                     const fromCenterX = fromNodeEl.x + (fromNodeEl.width || 0) / 2;
+                     const fromCenterY = fromNodeEl.y + (fromNodeEl.height || 0) / 2;
+                     const dx = toPoint.x - fromCenterX;
+                     const dy = toPoint.y - fromCenterY;
+                     const absDx = Math.abs(dx);
+                     const absDy = Math.abs(dy);
+                     
+                     if (absDy > absDx) {
+                       fromPoint = dy > 0 ? fromPorts[2] : fromPorts[0];
+                     } else {
+                       fromPoint = dx > 0 ? fromPorts[1] : fromPorts[3];
                      }
                    }
-                   fromPoint = bestFrom;
-                   toPoint = { x: el.endX || el.x, y: el.endY || el.y };
                    
                    // Generate path
                    if (el.lineType === LineType.STRAIGHT) {
                      pathData = `M ${fromPoint.x} ${fromPoint.y} L ${toPoint.x} ${toPoint.y}`;
                    } else if (el.lineType === LineType.STEP) {
-                     const midX = (fromPoint.x + toPoint.x) / 2;
-                     pathData = `M ${fromPoint.x} ${fromPoint.y} L ${midX} ${fromPoint.y} L ${midX} ${toPoint.y} L ${toPoint.x} ${toPoint.y}`;
+                     pathData = getRoundedStepPath(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y);
                    } else {
                      // CURVE
                      const dist = Math.sqrt(Math.pow(fromPoint.x - toPoint.x, 2) + Math.pow(fromPoint.y - toPoint.y, 2));
@@ -1197,8 +1541,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                    if (lineType === LineType.STRAIGHT) {
                      pathData = `M ${fromPoint.x} ${fromPoint.y} L ${toPoint.x} ${toPoint.y}`;
                    } else if (lineType === LineType.STEP) {
-                     const midX = (fromPoint.x + toPoint.x) / 2;
-                     pathData = `M ${fromPoint.x} ${fromPoint.y} L ${midX} ${fromPoint.y} L ${midX} ${toPoint.y} L ${toPoint.x} ${toPoint.y}`;
+                     pathData = getRoundedStepPath(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y);
                    } else {
                      // CURVE
                      const dist = Math.sqrt(Math.pow(fromPoint.x - toPoint.x, 2) + Math.pow(fromPoint.y - toPoint.y, 2));
@@ -1213,18 +1556,30 @@ export const Canvas: React.FC<CanvasProps> = ({
                      pathData = `M ${fromPoint.x} ${fromPoint.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${toPoint.x} ${toPoint.y}`;
                    }
                }
+               
+               // Apply offset if arrow is connected to elements and has manual offset
+               if ((el.fromId || el.toId) && (el.offsetX || el.offsetY)) {
+                 pathData = applyOffsetToPath(pathData, el.offsetX || 0, el.offsetY || 0, el.lineType || LineType.STRAIGHT);
+                 
+                 // Update endpoint positions after applying offset for straight lines
+                 if (el.lineType === LineType.STRAIGHT || !el.lineType) {
+                   // For straight lines, both endpoints move by the offset
+                   fromPoint = { x: fromPoint.x + (el.offsetX || 0), y: fromPoint.y + (el.offsetY || 0) };
+                   toPoint = { x: toPoint.x + (el.offsetX || 0), y: toPoint.y + (el.offsetY || 0) };
+                 }
+                 // For STEP and CURVE lines, endpoints don't move (only control points do)
+               }
 
                // Handle dragging connection point - show temporary line (respect lineType)
                const isDraggingConnection = isSelected && draggingConnectionPoint && tempConnectionPoint;
                if (isDraggingConnection) {
-                 const lineType = el.lineType || LineType.CURVE;
+                 const lineType = el.lineType || LineType.STRAIGHT;
                  if (draggingConnectionPoint === 'from') {
                    fromPoint = tempConnectionPoint;
                    if (lineType === LineType.STRAIGHT) {
                      pathData = `M ${fromPoint.x} ${fromPoint.y} L ${toPoint.x} ${toPoint.y}`;
                    } else if (lineType === LineType.STEP) {
-                     const midX = (fromPoint.x + toPoint.x) / 2;
-                     pathData = `M ${fromPoint.x} ${fromPoint.y} L ${midX} ${fromPoint.y} L ${midX} ${toPoint.y} L ${toPoint.x} ${toPoint.y}`;
+                     pathData = getRoundedStepPath(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y);
                    } else {
                      // CURVE
                      const dist = Math.sqrt(Math.pow(fromPoint.x - toPoint.x, 2) + Math.pow(fromPoint.y - toPoint.y, 2));
@@ -1243,8 +1598,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                    if (lineType === LineType.STRAIGHT) {
                      pathData = `M ${fromPoint.x} ${fromPoint.y} L ${toPoint.x} ${toPoint.y}`;
                    } else if (lineType === LineType.STEP) {
-                     const midX = (fromPoint.x + toPoint.x) / 2;
-                     pathData = `M ${fromPoint.x} ${fromPoint.y} L ${midX} ${fromPoint.y} L ${midX} ${toPoint.y} L ${toPoint.x} ${toPoint.y}`;
+                     pathData = getRoundedStepPath(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y);
                    } else {
                      // CURVE
                      const dist = Math.sqrt(Math.pow(fromPoint.x - toPoint.x, 2) + Math.pow(fromPoint.y - toPoint.y, 2));
@@ -1281,7 +1635,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                     {/* Actual Line */}
                     <path
                       d={pathData}
-                      stroke={isDraggingConnection ? '#10b981' : (isSelected ? '#2563eb' : el.strokeColor)}
+                      stroke={isDraggingConnection ? '#10b981' : (isSelected ? '#1890ff' : el.strokeColor)}
                       strokeWidth={isDraggingConnection ? el.strokeWidth + 1 : el.strokeWidth}
                       strokeDasharray={tempStrokeDash}
                       fill="none"
@@ -1299,10 +1653,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                           cx={fromPoint.x}
                           cy={fromPoint.y}
                           r="8"
-                          fill="#2563eb"
+                          fill="#1890ff"
                           stroke="white"
-                          strokeWidth="2"
-                          style={{ cursor: 'grab', pointerEvents: 'all' }}
+                          strokeWidth="2.5"
+                          style={{ cursor: 'grab', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             setDraggingConnectionPoint('from');
@@ -1315,10 +1669,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                           cx={toPoint.x}
                           cy={toPoint.y}
                           r="8"
-                          fill="#2563eb"
+                          fill="#1890ff"
                           stroke="white"
-                          strokeWidth="2"
-                          style={{ cursor: 'grab', pointerEvents: 'all' }}
+                          strokeWidth="2.5"
+                          style={{ cursor: 'grab', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             setDraggingConnectionPoint('to');
@@ -1326,12 +1680,167 @@ export const Canvas: React.FC<CanvasProps> = ({
                             setIsDrawing(true);
                           }}
                         />
+                        
+                        {/* Line segment control point for STEP lines - 只显示一个中间控制点 */}
+                        {el.lineType === LineType.STEP && (
+                          <>
+                            {/* Single control point at the middle of the step line */}
+                            {(() => {
+                              const dx = toPoint.x - fromPoint.x;
+                              const dy = toPoint.y - fromPoint.y;
+                              const absDx = Math.abs(dx);
+                              const absDy = Math.abs(dy);
+                              
+                              // 如果线实际上是直线（absDx < 5 或 absDy < 5），不显示控制点
+                              if (absDx < 5 || absDy < 5) {
+                                return null;
+                              }
+                              
+                              const isVerticalLayout = absDy > absDx;
+                              
+                              // 计算线的中点
+                              const midX = (fromPoint.x + toPoint.x) / 2;
+                              const midY = (fromPoint.y + toPoint.y) / 2;
+                              
+                              if (isVerticalLayout) {
+                                // VHV 模式：控制点在水平段中间，横向小横杠
+                                const actualMidY = midY + (el.offsetY || 0);
+                                
+                                return (
+                                  <rect
+                                    x={midX - 12}
+                                    y={actualMidY - 3}
+                                    width="24"
+                                    height="6"
+                                    fill="#1890ff"
+                                    stroke="white"
+                                    strokeWidth="1.5"
+                                    rx="3"
+                                    style={{ cursor: 'ns-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 3px rgba(24, 144, 255, 0.4))' }}
+                                    onMouseDown={(e) => {
+                                      e.stopPropagation();
+                                      const pos = getMousePos(e);
+                                      setSelectedElementId(el.id);
+                                      setDragStart(pos);
+                                      setDraggingStepSegment('horizontal');
+                                      setIsDrawing(true);
+                                      setHasMoved(false);
+                                      onHistorySave();
+                                    }}
+                                  />
+                                );
+                              } else {
+                                // HVH 模式：控制点在垂直段中间，竖向小横杠
+                                const actualMidX = midX + (el.offsetX || 0);
+                                
+                                return (
+                                  <rect
+                                    x={actualMidX - 3}
+                                    y={midY - 12}
+                                    width="6"
+                                    height="24"
+                                    fill="#1890ff"
+                                    stroke="white"
+                                    strokeWidth="1.5"
+                                    rx="3"
+                                    style={{ cursor: 'ew-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 3px rgba(24, 144, 255, 0.4))' }}
+                                    onMouseDown={(e) => {
+                                      e.stopPropagation();
+                                      const pos = getMousePos(e);
+                                      setSelectedElementId(el.id);
+                                      setDragStart(pos);
+                                      setDraggingStepSegment('vertical');
+                                      setIsDrawing(true);
+                                      setHasMoved(false);
+                                      onHistorySave();
+                                    }}
+                                  />
+                                );
+                              }
+                            })()}
+                          </>
+                        )}
+                        
+                        {/* Line segment control point for STRAIGHT lines - 飞书风格 */}
+                        {el.lineType === LineType.STRAIGHT && (
+                          <>
+                            {(() => {
+                              // Calculate midpoint - fromPoint/toPoint already include offset
+                              const midX = (fromPoint.x + toPoint.x) / 2;
+                              const midY = (fromPoint.y + toPoint.y) / 2;
+                              
+                              // Calculate line angle (in degrees)
+                              const dx = toPoint.x - fromPoint.x;
+                              const dy = toPoint.y - fromPoint.y;
+                              const lineAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+                              
+                              // 小横杠垂直于线条方向（旋转90度）
+                              // 横杠本身是水平的 (24x6)，通过旋转使其垂直于线条
+                              const barWidth = 24;
+                              const barHeight = 6;
+                              
+                              return (
+                                <rect
+                                  x={-barWidth / 2}
+                                  y={-barHeight / 2}
+                                  width={barWidth}
+                                  height={barHeight}
+                                  fill="#1890ff"
+                                  stroke="white"
+                                  strokeWidth="1.5"
+                                  rx="3"
+                                  transform={`translate(${midX}, ${midY}) rotate(${lineAngle})`}
+                                  style={{ cursor: 'move', pointerEvents: 'all', filter: 'drop-shadow(0 1px 3px rgba(24, 144, 255, 0.4))' }}
+                                  onMouseDown={(e) => {
+                                    e.stopPropagation();
+                                    const pos = getMousePos(e);
+                                    setDragStart(pos);
+                                    setIsDrawing(true);
+                                    setHasMoved(false);
+                                    onHistorySave();
+                                  }}
+                                />
+                              );
+                            })()}
+                          </>
+                        )}
+                        
+                        {/* Line segment control point for CURVE lines - 飞书风格 */}
+                        {el.lineType === LineType.CURVE && (
+                          <>
+                            {(() => {
+                              // Calculate midpoint - fromPoint/toPoint already include offset for curves
+                              const midX = (fromPoint.x + toPoint.x) / 2;
+                              const midY = (fromPoint.y + toPoint.y) / 2;
+                              
+                              return (
+                                <circle
+                                  cx={midX}
+                                  cy={midY}
+                                  r="8"
+                                  fill="#1890ff"
+                                  stroke="white"
+                                  strokeWidth="2"
+                                  style={{ cursor: 'move', pointerEvents: 'all', filter: 'drop-shadow(0 1px 3px rgba(24, 144, 255, 0.4))' }}
+                                  onMouseDown={(e) => {
+                                    e.stopPropagation();
+                                    const pos = getMousePos(e);
+                                    setDragStart(pos);
+                                    setIsDrawing(true);
+                                    setHasMoved(false);
+                                    onHistorySave();
+                                  }}
+                                />
+                              );
+                            })()}
+                          </>
+                        )}
                       </>
                     )}
                     
                     {/* Hover indicator for snap target */}
                     {draggingConnectionPoint && hoveredElementId && tempConnectionPoint && (() => {
-                      const nearest = findNearestElement(tempConnectionPoint);
+                      const nearest = findNearestElement(tempConnectionPoint, true);
                       if (nearest && nearest.id === hoveredElementId) {
                         return (
                           <circle
@@ -1350,19 +1859,44 @@ export const Canvas: React.FC<CanvasProps> = ({
                     })()}
                     
                     {el.text && (
-                       // Simplified text placement at 50% of path would be complex for bezier, 
-                       // so we approximate center between start/end for now
-                       <foreignObject 
-                        x={(fromPoint.x + toPoint.x)/2 - 40} 
-                        y={(fromPoint.y + toPoint.y)/2 - 15} 
-                        width="80" 
-                        height="30"
-                        style={{pointerEvents: 'none'}}
-                      >
-                        <div className="bg-white/90 backdrop-blur-sm px-1 rounded text-xs text-center text-gray-500 border border-gray-200 shadow-sm truncate">
-                          {el.text}
-                        </div>
-                      </foreignObject>
+                       // 标签位置基于 labelPosition（0-1），默认 0.5（中点）
+                       (() => {
+                         const t = el.labelPosition ?? 0.5;
+                         const labelX = fromPoint.x + (toPoint.x - fromPoint.x) * t;
+                         const labelY = fromPoint.y + (toPoint.y - fromPoint.y) * t;
+                         const isDraggingThisLabel = draggingLabel === el.id;
+                         
+                         return (
+                           <foreignObject 
+                             x={labelX - 50} 
+                             y={labelY - 12} 
+                             width="100" 
+                             height="24"
+                             style={{ 
+                               pointerEvents: 'all', 
+                               cursor: 'grab',
+                               overflow: 'visible'
+                             }}
+                             onMouseDown={(e) => {
+                               e.stopPropagation();
+                               setDraggingLabel(el.id);
+                               setDragStart(getMousePos(e));
+                               setIsDrawing(true);
+                               setHasMoved(false);
+                               onHistorySave();
+                             }}
+                           >
+                             <div 
+                               className={`bg-white/95 backdrop-blur-sm px-2 py-0.5 rounded text-xs text-center text-gray-600 border shadow-sm truncate select-none ${
+                                 isDraggingThisLabel ? 'border-blue-400 ring-2 ring-blue-200' : 'border-gray-200'
+                               }`}
+                               style={{ cursor: isDraggingThisLabel ? 'grabbing' : 'grab' }}
+                             >
+                               {el.text}
+                             </div>
+                           </foreignObject>
+                         );
+                       })()
                     )}
                  </g>
                );
@@ -1441,17 +1975,29 @@ export const Canvas: React.FC<CanvasProps> = ({
 
                 {isSelected && el.type !== ToolType.TEXT && (
                   <>
+                   {/* Background highlight (飞书风格) */}
+                   <rect
+                     x={el.x - 6}
+                     y={el.y - 6}
+                     width={(el.width || 0) + 12}
+                     height={(el.height || 0) + 12}
+                     fill="rgba(24, 144, 255, 0.08)"
+                     stroke="none"
+                     rx={12}
+                     style={{pointerEvents: 'none'}}
+                   />
+                   {/* Border (飞书风格 - 柔和的蓝色) */}
                    <rect
                      x={el.x - 4}
                      y={el.y - 4}
                      width={(el.width || 0) + 8}
                      height={(el.height || 0) + 8}
                      fill="none"
-                     stroke="#3b82f6"
-                     strokeWidth="1.5"
-                     strokeDasharray="4"
+                     stroke="#1890ff"
+                     strokeWidth="2"
+                     strokeDasharray="5,5"
                      rx={10}
-                     style={{pointerEvents: 'none'}}
+                     style={{pointerEvents: 'none', filter: 'drop-shadow(0 2px 4px rgba(24, 144, 255, 0.2))'}}
                    />
                    {/* Resize Handles */}
                    {(el.type === ToolType.RECTANGLE || el.type === ToolType.CIRCLE) && (
@@ -1461,10 +2007,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                          cx={el.x}
                          cy={el.y}
                          r="6"
-                         fill="#3b82f6"
+                         fill="#1890ff"
                          stroke="white"
-                         strokeWidth="2"
-                         style={{ cursor: 'nwse-resize', pointerEvents: 'all' }}
+                         strokeWidth="2.5"
+                         style={{ cursor: 'nwse-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                          onMouseDown={(e) => {
                            e.stopPropagation();
                            setResizingHandle('nw');
@@ -1480,10 +2026,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                          cx={el.x + (el.width || 0)}
                          cy={el.y}
                          r="6"
-                         fill="#3b82f6"
+                         fill="#1890ff"
                          stroke="white"
-                         strokeWidth="2"
-                         style={{ cursor: 'nesw-resize', pointerEvents: 'all' }}
+                         strokeWidth="2.5"
+                         style={{ cursor: 'nesw-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                          onMouseDown={(e) => {
                            e.stopPropagation();
                            setResizingHandle('ne');
@@ -1499,10 +2045,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                          cx={el.x}
                          cy={el.y + (el.height || 0)}
                          r="6"
-                         fill="#3b82f6"
+                         fill="#1890ff"
                          stroke="white"
-                         strokeWidth="2"
-                         style={{ cursor: 'nesw-resize', pointerEvents: 'all' }}
+                         strokeWidth="2.5"
+                         style={{ cursor: 'nesw-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                          onMouseDown={(e) => {
                            e.stopPropagation();
                            setResizingHandle('sw');
@@ -1518,10 +2064,10 @@ export const Canvas: React.FC<CanvasProps> = ({
                          cx={el.x + (el.width || 0)}
                          cy={el.y + (el.height || 0)}
                          r="6"
-                         fill="#3b82f6"
+                         fill="#1890ff"
                          stroke="white"
-                         strokeWidth="2"
-                         style={{ cursor: 'nwse-resize', pointerEvents: 'all' }}
+                         strokeWidth="2.5"
+                         style={{ cursor: 'nwse-resize', pointerEvents: 'all', filter: 'drop-shadow(0 1px 2px rgba(24, 144, 255, 0.3))' }}
                          onMouseDown={(e) => {
                            e.stopPropagation();
                            setResizingHandle('se');

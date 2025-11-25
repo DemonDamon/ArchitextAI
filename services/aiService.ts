@@ -466,7 +466,7 @@ function parseResponse(responseText: string): DiagramElement[] {
         fillColor: "transparent",
         strokeWidth: 2,
         text: edge.label || "",
-        lineType: LineType.STRAIGHT,
+        lineType: LineType.STEP, // 默认使用 STEP 类型
         lineStyle: LineStyle.SOLID,
         markerEnd: true
       };

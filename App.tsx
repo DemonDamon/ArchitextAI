@@ -3,10 +3,11 @@ import { Toolbar } from './components/Toolbar';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { Canvas } from './components/Canvas';
 import { GeminiInput } from './components/GeminiInput';
-import { DiagramElement, ToolType } from './types';
+import { DiagramElement, ToolType, GenerationHistory } from './types';
 import { FileImage, Trash2, CheckCircle2, AlertCircle, RotateCcw, RotateCw } from 'lucide-react';
 
 const STORAGE_KEY = 'paperplot-elements-v1';
+const HISTORY_STORAGE_KEY = 'paperplot-history-v1';
 
 const App: React.FC = () => {
   const [elements, setElements] = useState<DiagramElement[]>([]);
@@ -20,6 +21,9 @@ const App: React.FC = () => {
   // History Stacks
   const [past, setPast] = useState<DiagramElement[][]>([]);
   const [future, setFuture] = useState<DiagramElement[][]>([]);
+  
+  // Generation History
+  const [generationHistory, setGenerationHistory] = useState<GenerationHistory[]>([]);
 
   // Load from local storage on mount
   useEffect(() => {
@@ -31,6 +35,17 @@ const App: React.FC = () => {
         console.error("Failed to parse saved diagram", e);
       }
     }
+    
+    // Load generation history
+    const savedHistory = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (savedHistory) {
+      try {
+        setGenerationHistory(JSON.parse(savedHistory));
+      } catch (e) {
+        console.error("Failed to parse saved history", e);
+      }
+    }
+    
     setIsLoaded(true);
   }, []);
 
@@ -79,6 +94,69 @@ const App: React.FC = () => {
     setElements(prev => prev.filter(el => el.id !== selectedElementId));
     setSelectedElementId(null);
   }, [selectedElementId, saveToHistory]);
+
+  // Clean up invalid arrows (arrows that are too short) - called manually or on mount
+  const cleanupInvalidArrows = useCallback(() => {
+    const MIN_ARROW_DISTANCE = 20;
+    let hasInvalidArrows = false;
+    
+    const cleanedElements = elements.filter(el => {
+      if (el.type !== ToolType.ARROW) return true;
+      
+      // Check if arrow has both fromId and toId (smart connection)
+      if (el.fromId && el.toId) {
+        const fromNode = elements.find(e => e.id === el.fromId);
+        const toNode = elements.find(e => e.id === el.toId);
+        
+        if (fromNode && toNode) {
+          // Calculate distance between connected nodes
+          const fromX = fromNode.x + (fromNode.width || 0) / 2;
+          const fromY = fromNode.y + (fromNode.height || 0) / 2;
+          const toX = toNode.x + (toNode.width || 0) / 2;
+          const toY = toNode.y + (toNode.height || 0) / 2;
+          
+          const dx = toX - fromX;
+          const dy = toY - fromY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < MIN_ARROW_DISTANCE) {
+            hasInvalidArrows = true;
+            return false; // Remove this arrow
+          }
+        }
+        return true;
+      }
+      
+      // Check if arrow has manual coordinates
+      if (el.endX !== undefined && el.endY !== undefined) {
+        const dx = el.endX - el.x;
+        const dy = el.endY - el.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < MIN_ARROW_DISTANCE) {
+          hasInvalidArrows = true;
+          return false; // Remove this arrow
+        }
+      }
+      
+      return true;
+    });
+    
+    if (hasInvalidArrows) {
+      saveToHistory();
+      setElements(cleanedElements);
+      // If deleted arrow was selected, clear selection
+      if (selectedElementId && !cleanedElements.find(el => el.id === selectedElementId)) {
+        setSelectedElementId(null);
+      }
+    }
+  }, [elements, selectedElementId, saveToHistory]);
+
+  // Auto-cleanup invalid arrows on mount (one-time cleanup)
+  useEffect(() => {
+    cleanupInvalidArrows();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -220,6 +298,125 @@ const App: React.FC = () => {
     clone.querySelectorAll('[style*="pointer-events"]').forEach(el => {
       const htmlEl = el as HTMLElement;
       htmlEl.style.pointerEvents = 'none';
+    });
+
+    // Convert foreignObject elements to native SVG to avoid tainted canvas
+    clone.querySelectorAll('foreignObject').forEach(foreignObj => {
+      try {
+        const x = parseFloat(foreignObj.getAttribute('x') || '0');
+        const y = parseFloat(foreignObj.getAttribute('y') || '0');
+        const width = parseFloat(foreignObj.getAttribute('width') || '0');
+        const height = parseFloat(foreignObj.getAttribute('height') || '0');
+        
+        // Extract text content from the foreignObject
+        const textContent = foreignObj.textContent?.trim() || '';
+        
+        if (textContent && width > 50) { // Only convert if it's a substantial element (not arrow labels)
+          // Create a group to hold icon and text
+          const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+          
+          // Try to extract the actual SVG icon from lucide-react
+          const iconSvg = foreignObj.querySelector('svg');
+          let iconY = y + height / 3;
+          let textY = y + height / 2;
+          
+          if (iconSvg) {
+            // Clone the icon SVG and convert it to native SVG
+            const iconGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            
+            // Get icon properties
+            const iconSize = parseFloat(iconSvg.getAttribute('width') || iconSvg.getAttribute('viewBox')?.split(' ')[2] || '24');
+            const iconColor = iconSvg.getAttribute('stroke') || iconSvg.getAttribute('color') || '#94a3b8';
+            
+            // Position the icon at the center-top of the element
+            const iconX = x + width / 2;
+            iconGroup.setAttribute('transform', `translate(${iconX - iconSize / 2}, ${iconY - iconSize / 2})`);
+            
+            // Copy all child elements of the icon SVG
+            Array.from(iconSvg.children).forEach(child => {
+              const clonedChild = child.cloneNode(true) as SVGElement;
+              // Ensure stroke color is set
+              if (clonedChild.hasAttribute('stroke') || clonedChild.nodeName === 'path' || clonedChild.nodeName === 'line' || clonedChild.nodeName === 'circle' || clonedChild.nodeName === 'rect') {
+                if (!clonedChild.getAttribute('stroke') || clonedChild.getAttribute('stroke') === 'currentColor') {
+                  clonedChild.setAttribute('stroke', iconColor);
+                }
+                if (!clonedChild.getAttribute('fill') || clonedChild.getAttribute('fill') === 'currentColor') {
+                  clonedChild.setAttribute('fill', 'none');
+                }
+              }
+              iconGroup.appendChild(clonedChild);
+            });
+            
+            group.appendChild(iconGroup);
+            
+            // Adjust text position below the icon
+            textY = y + height / 2 + 15;
+          }
+          
+          // Create a native SVG text element
+          const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          textEl.setAttribute('x', (x + width / 2).toString());
+          textEl.setAttribute('y', textY.toString());
+          textEl.setAttribute('text-anchor', 'middle');
+          textEl.setAttribute('dominant-baseline', 'middle');
+          textEl.setAttribute('fill', '#1e293b');
+          textEl.setAttribute('font-size', '16');
+          textEl.setAttribute('font-weight', '500');
+          
+          // Handle multi-line text if needed
+          const maxWidth = width - 20;
+          const words = textContent.split(/\s+/);
+          let line = '';
+          let lineCount = 0;
+          
+          words.forEach((word, i) => {
+            const testLine = line + (line ? ' ' : '') + word;
+            // Simple approximation: ~8px per character
+            if (testLine.length * 8 > maxWidth && line) {
+              const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+              tspan.setAttribute('x', (x + width / 2).toString());
+              tspan.setAttribute('dy', lineCount === 0 ? '0' : '1.2em');
+              tspan.textContent = line;
+              textEl.appendChild(tspan);
+              line = word;
+              lineCount++;
+            } else {
+              line = testLine;
+            }
+            
+            // Last word
+            if (i === words.length - 1) {
+              const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+              tspan.setAttribute('x', (x + width / 2).toString());
+              tspan.setAttribute('dy', lineCount === 0 ? '0' : '1.2em');
+              tspan.textContent = line;
+              textEl.appendChild(tspan);
+            }
+          });
+          
+          group.appendChild(textEl);
+          
+          // Replace foreignObject with group
+          foreignObj.parentNode?.replaceChild(group, foreignObj);
+        } else if (textContent) {
+          // Small foreignObject (like arrow labels), convert to simple text
+          const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          textEl.setAttribute('x', (x + width / 2).toString());
+          textEl.setAttribute('y', (y + height / 2).toString());
+          textEl.setAttribute('text-anchor', 'middle');
+          textEl.setAttribute('dominant-baseline', 'middle');
+          textEl.setAttribute('fill', '#6b7280');
+          textEl.setAttribute('font-size', '12');
+          textEl.textContent = textContent;
+          foreignObj.parentNode?.replaceChild(textEl, foreignObj);
+        } else {
+          // Remove empty foreignObject
+          foreignObj.remove();
+        }
+      } catch (e) {
+        console.warn('Failed to convert foreignObject:', e);
+        foreignObj.remove();
+      }
     });
 
     return clone;
@@ -423,10 +620,22 @@ const App: React.FC = () => {
 
         {/* Right: Gemini AI Input (Always visible) */}
         <GeminiInput 
-          onElementsGenerated={(newElements) => {
+          history={generationHistory}
+          onElementsGenerated={(newElements, prompt, image) => {
             saveToHistory(); 
             setElements(prev => [...prev, ...newElements]);
-          }} 
+            
+            // Save to generation history
+            const newHistoryItem: GenerationHistory = {
+              id: `history_${Date.now()}`,
+              prompt,
+              image,
+              timestamp: Date.now()
+            };
+            const updatedHistory = [newHistoryItem, ...generationHistory].slice(0, 50); // Keep last 50
+            setGenerationHistory(updatedHistory);
+            localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
+          }}
         />
       </div>
     </div>
