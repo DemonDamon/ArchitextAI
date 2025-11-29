@@ -1,22 +1,62 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { Toolbar } from './components/Toolbar';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { Canvas } from './components/Canvas';
+import { Canvas, CanvasRef } from './components/Canvas';
 import { GeminiInput } from './components/GeminiInput';
-import { DiagramElement, ToolType, GenerationHistory } from './types';
+import { DiagramElement, ToolType, GenerationHistory, LineStyle } from './types';
 import { FileImage, Trash2, CheckCircle2, AlertCircle, RotateCcw, RotateCw } from 'lucide-react';
 
 const STORAGE_KEY = 'paperplot-elements-v1';
 const HISTORY_STORAGE_KEY = 'paperplot-history-v1';
 
+// Compress image to thumbnail for storage (reduces size significantly)
+const compressImageForStorage = (imageBase64: string, maxWidth: number = 200, maxHeight: number = 150, quality: number = 0.7): Promise<string | null> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let width = img.width;
+      let height = img.height;
+      
+      // Calculate new dimensions
+      if (width > height) {
+        if (width > maxWidth) {
+          height = (height * maxWidth) / width;
+          width = maxWidth;
+        }
+      } else {
+        if (height > maxHeight) {
+          width = (width * maxHeight) / height;
+          height = maxHeight;
+        }
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, width, height);
+        const compressed = canvas.toDataURL('image/jpeg', quality);
+        resolve(compressed);
+      } else {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = imageBase64;
+  });
+};
+
 const App: React.FC = () => {
   const [elements, setElements] = useState<DiagramElement[]>([]);
   const [selectedTool, setSelectedTool] = useState<ToolType>(ToolType.SELECT);
-  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
-  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [selectedElementIds, setSelectedElementIds] = useState<string[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved');
+  const [clipboard, setClipboard] = useState<DiagramElement[]>([]);
 
   // History Stacks
   const [past, setPast] = useState<DiagramElement[][]>([]);
@@ -24,6 +64,10 @@ const App: React.FC = () => {
   
   // Generation History
   const [generationHistory, setGenerationHistory] = useState<GenerationHistory[]>([]);
+  
+  // Track if generation is in progress
+  const isGeneratingRef = useRef(false);
+  const canvasRef = useRef<CanvasRef>(null);
 
   // Load from local storage on mount
   useEffect(() => {
@@ -36,13 +80,43 @@ const App: React.FC = () => {
       }
     }
     
-    // Load generation history
+    // Load generation history with size check and cleanup
     const savedHistory = localStorage.getItem(HISTORY_STORAGE_KEY);
     if (savedHistory) {
       try {
-        setGenerationHistory(JSON.parse(savedHistory));
+        const parsed = JSON.parse(savedHistory);
+        // Limit to last 20 items and remove images if still too large
+        const limited = Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+        
+        // Try to set the limited history
+        try {
+          localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(limited));
+          setGenerationHistory(limited);
+        } catch (e) {
+          // If still too large, remove images
+          console.warn('[App] History too large, removing images');
+          const withoutImages = limited.map((item: GenerationHistory) => ({
+            ...item,
+            image: null
+          }));
+          try {
+            localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(withoutImages));
+            setGenerationHistory(withoutImages);
+          } catch (finalError) {
+            // Last resort: clear history
+            console.error('[App] Failed to save cleaned history, clearing:', finalError);
+            localStorage.removeItem(HISTORY_STORAGE_KEY);
+            setGenerationHistory([]);
+          }
+        }
       } catch (e) {
         console.error("Failed to parse saved history", e);
+        // Clear corrupted history
+        try {
+          localStorage.removeItem(HISTORY_STORAGE_KEY);
+        } catch (clearError) {
+          console.error("Failed to clear corrupted history", clearError);
+        }
       }
     }
     
@@ -88,12 +162,12 @@ const App: React.FC = () => {
     setFuture(newFuture);
   }, [elements, future]);
 
-  const deleteSelectedElement = useCallback(() => {
-    if (!selectedElementId) return;
+  const deleteSelectedElements = useCallback(() => {
+    if (selectedElementIds.length === 0) return;
     saveToHistory();
-    setElements(prev => prev.filter(el => el.id !== selectedElementId));
-    setSelectedElementId(null);
-  }, [selectedElementId, saveToHistory]);
+    setElements(prev => prev.filter(el => !selectedElementIds.includes(el.id)));
+    setSelectedElementIds([]);
+  }, [selectedElementIds, saveToHistory]);
 
   // Clean up invalid arrows (arrows that are too short) - called manually or on mount
   const cleanupInvalidArrows = useCallback(() => {
@@ -146,11 +220,13 @@ const App: React.FC = () => {
       saveToHistory();
       setElements(cleanedElements);
       // If deleted arrow was selected, clear selection
-      if (selectedElementId && !cleanedElements.find(el => el.id === selectedElementId)) {
-        setSelectedElementId(null);
+      const remainingIds = new Set(cleanedElements.map(el => el.id));
+      const newSelection = selectedElementIds.filter(id => remainingIds.has(id));
+      if (newSelection.length !== selectedElementIds.length) {
+        setSelectedElementIds(newSelection);
       }
     }
-  }, [elements, selectedElementId, saveToHistory]);
+  }, [elements, selectedElementIds, saveToHistory]);
 
   // Auto-cleanup invalid arrows on mount (one-time cleanup)
   useEffect(() => {
@@ -158,9 +234,127 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run once on mount
 
+  // Copy/Paste functionality
+  const handleCopy = useCallback(() => {
+    if (selectedElementIds.length === 0) return;
+    const selectedElements = elements.filter(el => selectedElementIds.includes(el.id));
+    setClipboard(selectedElements);
+  }, [elements, selectedElementIds]);
+
+  const handlePaste = useCallback(() => {
+    if (clipboard.length === 0) return;
+    saveToHistory();
+    
+    // Create ID mapping for remapping connections
+    const idMap = new Map<string, string>();
+    clipboard.forEach(el => {
+      idMap.set(el.id, `el_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+    });
+
+    const offset = 20; // Offset pasted elements
+    const newElements = clipboard.map(el => {
+      const newId = idMap.get(el.id)!;
+      
+      return {
+        ...el,
+        id: newId,
+        x: el.x + offset,
+        y: el.y + offset,
+        // Remap internal connections
+        fromId: el.fromId && idMap.has(el.fromId) ? idMap.get(el.fromId) : undefined,
+        toId: el.toId && idMap.has(el.toId) ? idMap.get(el.toId) : undefined,
+        // Clear groupId if group is not in clipboard
+        groupId: el.groupId && idMap.has(el.groupId) ? idMap.get(el.groupId) : undefined
+      };
+    });
+
+    setElements(prev => [...prev, ...newElements]);
+    setSelectedElementIds(newElements.map(e => e.id));
+  }, [clipboard, saveToHistory]);
+
+  // Create Group from selection
+  const handleCreateGroup = useCallback(() => {
+    if (selectedElementIds.length === 0) return;
+    
+    const selectedEls = elements.filter(el => selectedElementIds.includes(el.id));
+    if (selectedEls.length === 0) return;
+
+    saveToHistory();
+
+    // Calculate bounding box
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    selectedEls.forEach(el => {
+      let w = el.width || 0;
+      let h = el.height || 0;
+      
+      // Estimate width/height for elements that might not have it set
+      if (el.type === ToolType.TEXT) {
+        // Use a reasonable default if not present. 
+        // Ideally this should be measured, but for bounding box, an estimation is okay or use min size
+        w = w || (el.text ? el.text.length * (el.fontSize || 16) * 0.6 + 20 : 100); 
+        h = h || ((el.fontSize || 16) * 1.5 + 10);
+      }
+      
+      const elMinX = el.x;
+      const elMinY = el.y;
+      const elMaxX = el.x + w;
+      const elMaxY = el.y + h;
+      
+      minX = Math.min(minX, elMinX);
+      minY = Math.min(minY, elMinY);
+      maxX = Math.max(maxX, elMaxX);
+      maxY = Math.max(maxY, elMaxY);
+    });
+    
+    // Add padding
+    const padding = 40;
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+
+    const groupId = `group_${Date.now()}`;
+    const groupElement: DiagramElement = {
+      id: groupId,
+      type: ToolType.GROUP,
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+      text: 'New Group',
+      fillColor: 'rgba(148, 163, 184, 0.05)',
+      strokeColor: '#94a3b8',
+      strokeWidth: 2,
+      lineStyle: LineStyle.DASHED
+    };
+
+    // Update children to reference group
+    const updatedElements = elements.map(el => {
+      if (selectedElementIds.includes(el.id)) {
+        return { ...el, groupId };
+      }
+      return el;
+    });
+
+    setElements([...updatedElements, groupElement]);
+    setSelectedElementIds([groupId]);
+  }, [elements, selectedElementIds, saveToHistory]);
+
+  // Select All
+  const handleSelectAll = useCallback(() => {
+    const allIds = elements.filter(el => el.type !== ToolType.ARROW).map(el => el.id);
+    setSelectedElementIds(allIds);
+  }, [elements]);
+
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger shortcuts if user is typing
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+      
       // Undo/Redo
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         e.preventDefault();
@@ -172,46 +366,80 @@ const App: React.FC = () => {
         return;
       }
       
-      // Delete selected element (Backspace or Delete)
-      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedElementId) {
-        // Don't delete if user is typing in an input/textarea
-        const target = e.target as HTMLElement;
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-          return;
-        }
-        
+      // Copy
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
         e.preventDefault();
-        deleteSelectedElement();
+        handleCopy();
+        return;
+      }
+      
+      // Paste
+      if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+        e.preventDefault();
+        handlePaste();
+        return;
+      }
+      
+      // Group
+      if ((e.metaKey || e.ctrlKey) && e.key === 'g') {
+        e.preventDefault();
+        handleCreateGroup();
+        return;
+      }
+      
+      // Select All
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        e.preventDefault();
+        handleSelectAll();
+        return;
+      }
+      
+      // Delete selected elements (Backspace or Delete)
+      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedElementIds.length > 0) {
+        e.preventDefault();
+        deleteSelectedElements();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, selectedElementId, deleteSelectedElement]);
+  }, [handleUndo, handleRedo, handleCopy, handlePaste, handleCreateGroup, handleSelectAll, selectedElementIds, deleteSelectedElements]);
 
 
   const updateSelectedElement = (updates: Partial<DiagramElement>, saveHistory: boolean = true) => {
-    if (!selectedElementId) return;
+    // Update the primary selected element (last in selection)
+    if (selectedElementIds.length === 0) return;
+    
+    const primaryId = selectedElementIds[selectedElementIds.length - 1];
     
     if (saveHistory) {
       saveToHistory();
     }
 
     setElements(prev => prev.map(el =>
-      el.id === selectedElementId ? { ...el, ...updates } : el
+      el.id === primaryId ? { ...el, ...updates } : el
     ));
-    
-    // Clear group selection if element is removed from group
-    if (updates.groupId === undefined && selectedGroupId) {
-      setSelectedGroupId(null);
-    }
   };
 
 
   const handleClearCanvas = () => {
+    // If generating, clear immediately without confirmation
+    if (isGeneratingRef.current) {
+      flushSync(() => {
+        setElements([]);
+        setSelectedElementIds([]);
+      });
+      localStorage.removeItem(STORAGE_KEY);
+      setConfirmClear(false);
+      return;
+    }
+    
+    // Normal clear with confirmation
     if (confirmClear) {
       saveToHistory();
-      setElements([]);
-      setSelectedElementId(null);
+      flushSync(() => {
+        setElements([]);
+        setSelectedElementIds([]);
+      });
       localStorage.removeItem(STORAGE_KEY);
       setConfirmClear(false);
     } else {
@@ -597,44 +825,100 @@ const App: React.FC = () => {
 
         {/* Center: Canvas */}
         <Canvas
+          ref={canvasRef}
           elements={elements}
           setElements={setElements}
           selectedTool={selectedTool}
           setSelectedTool={setSelectedTool}
-          selectedElementId={selectedElementId}
-          setSelectedElementId={setSelectedElementId}
+          selectedElementIds={selectedElementIds}
+          setSelectedElementIds={setSelectedElementIds}
           onHistorySave={saveToHistory}
-          selectedGroupId={selectedGroupId}
-          setSelectedGroupId={setSelectedGroupId}
         />
 
         {/* Left: Properties Panel (Overlay, only visible if element is selected) */}
         <PropertiesPanel
-          element={elements.find(el => el.id === selectedElementId) || null}
+          element={selectedElementIds.length > 0 ? (elements.find(el => el.id === selectedElementIds[selectedElementIds.length - 1]) || null) : null}
           elements={elements}
           updateElement={updateSelectedElement}
-          deleteElement={deleteSelectedElement}
+          deleteElement={deleteSelectedElements}
           onHistorySave={saveToHistory}
-          onClose={() => setSelectedElementId(null)}
+          onClose={() => setSelectedElementIds([])}
+          onCreateGroup={handleCreateGroup}
         />
 
         {/* Right: Gemini AI Input (Always visible) */}
         <GeminiInput 
           history={generationHistory}
-          onElementsGenerated={(newElements, prompt, image) => {
-            saveToHistory(); 
-            setElements(prev => [...prev, ...newElements]);
+          onGenerationStart={() => {
+            // Clear canvas immediately when generation starts (before AI processing)
+            isGeneratingRef.current = true;
+            saveToHistory();
+            // Use flushSync to ensure immediate DOM update
+            flushSync(() => {
+              setElements([]);
+              setSelectedElementIds([]);
+            });
+          }}
+          onGenerationEnd={() => {
+            // Reset generation state when generation ends (success or failure)
+            isGeneratingRef.current = false;
+          }}
+          onElementsGenerated={async (newElements, prompt, image) => {
+            // Add new elements after generation completes
+            setElements(newElements);
+            setSelectedElementIds([]);
+            
+            // Trigger Fit View
+            setTimeout(() => {
+              canvasRef.current?.fitView(newElements);
+            }, 100);
             
             // Save to generation history
+            // Compress image to thumbnail to save storage space
+            const compressedImage = image ? await compressImageForStorage(image) : null;
+            
             const newHistoryItem: GenerationHistory = {
               id: `history_${Date.now()}`,
               prompt,
-              image,
+              image: compressedImage,
               timestamp: Date.now()
             };
-            const updatedHistory = [newHistoryItem, ...generationHistory].slice(0, 50); // Keep last 50
+            
+            // Reduce history count to prevent storage quota issues (keep last 20 instead of 50)
+            const updatedHistory = [newHistoryItem, ...generationHistory].slice(0, 20);
             setGenerationHistory(updatedHistory);
-            localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
+            
+            // Save with error handling
+            try {
+              localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
+            } catch (error) {
+              console.warn('[App] Failed to save history to localStorage:', error);
+              // If storage fails, try to save without images
+              const historyWithoutImages = updatedHistory.map(item => ({
+                ...item,
+                image: null
+              }));
+              try {
+                localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(historyWithoutImages));
+                setGenerationHistory(historyWithoutImages);
+              } catch (e) {
+                console.error('[App] Failed to save history even without images:', e);
+                // Clear old history and try again with just the new item (without image)
+                try {
+                  const minimalHistory = [{ ...newHistoryItem, image: null }];
+                  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(minimalHistory));
+                  setGenerationHistory(minimalHistory);
+                } catch (finalError) {
+                  console.error('[App] Failed to save any history:', finalError);
+                  // Last resort: clear localStorage history and don't save
+                  try {
+                    localStorage.removeItem(HISTORY_STORAGE_KEY);
+                  } catch (clearError) {
+                    console.error('[App] Failed to clear history:', clearError);
+                  }
+                }
+              }
+            }
           }}
         />
       </div>

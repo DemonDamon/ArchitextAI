@@ -4,8 +4,9 @@ import { DiagramElement, ToolType, LineType, LineStyle } from "../types";
 const generateId = () => `el_${Math.random().toString(36).substr(2, 9)}`;
 
 // Layout constants
-const COL_WIDTH = 280;
-const ROW_HEIGHT = 160; 
+// Reduced spacing to make the diagram more compact
+const COL_WIDTH = 280; // Reduced from 350
+const ROW_HEIGHT = 160; // Reduced from 200
 const START_X = 60;
 const START_Y = 60;
 
@@ -83,12 +84,22 @@ async function generateWithGemini(prompt: string, imageBase64?: string | null): 
     text: `Create a detailed scientific diagram structure for: "${prompt}". 
     If an image is provided, analyze the image to understand the structure, connections, node types, and groups/subgraphs, and recreate it as closely as possible using the available shapes.
     
-    Important:
+    CRITICAL LAYOUT REQUIREMENTS:
+    - Each node has a width of 200px and height of 100px.
+    - Nodes must be spaced far enough apart to prevent overlap. Use row and col values that ensure:
+      * Horizontal spacing: adjacent nodes in different columns should have col values that differ by at least 1 (preferably 2-3 for clarity).
+      * Vertical spacing: adjacent nodes in different rows should have row values that differ by at least 1 (preferably 2 for clarity).
+      * Avoid placing nodes too close together - leave room for arrows to connect cleanly from node edges.
+    - Arrange nodes in a logical flow: top-to-bottom or left-to-right based on the process flow.
+    - Ensure arrows can connect cleanly from one node's edge to another node's edge without crossing through nodes.
+    
+    IMPORTANT:
     - Break down lists into individual nodes. Use specific Lucide icon names for each node.
     - If nodes belong to a logical group (like "工具集" containing multiple tools, or "执行代理" containing multiple agents), assign them the same groupId.
     - Groups represent subgraphs or logical containers (e.g., "工具集", "金融模型", "执行代理").
     - Nodes in the same group should have the same groupId string value.
-    - Each group should have a meaningful label that describes the collection of nodes.`
+    - Each group should have a meaningful label that describes the collection of nodes.
+    - When creating edges, ensure the from and to nodes are properly spaced to avoid visual clutter.`
   });
 
   const response = await ai.models.generateContent({
@@ -152,9 +163,20 @@ async function generateWithBailian(prompt: string, imageBase64?: string | null):
         type: 'text',
         text: `Create a detailed scientific diagram structure for: "${prompt}". 
         You must return valid JSON format only with nodes and edges. 
+        
+        CRITICAL LAYOUT REQUIREMENTS:
+        - Each node has a width of 200px and height of 100px.
+        - Nodes must be spaced far enough apart to prevent overlap. Use row and col values that ensure:
+          * Horizontal spacing: adjacent nodes in different columns should have col values that differ by at least 1 (preferably 2-3 for clarity).
+          * Vertical spacing: adjacent nodes in different rows should have row values that differ by at least 1 (preferably 2 for clarity).
+          * Avoid placing nodes too close together - leave room for arrows to connect cleanly from node edges.
+        - Arrange nodes in a logical flow: top-to-bottom or left-to-right based on the process flow.
+        - Ensure arrows can connect cleanly from one node's edge to another node's edge without crossing through nodes.
+        
         Each node should have: id, label, icon (Lucide icon name), category (input/process/output/database/default), row, col, groupId (optional - nodes with same groupId belong to same group/subgraph).
         Each edge should have: from, to, label.
         If nodes belong to a logical group (like "工具集" containing multiple tools), assign them the same groupId.
+        When creating edges, ensure the from and to nodes are properly spaced to avoid visual clutter.
         Return the result as a JSON object.`
       }
     ]
@@ -218,9 +240,20 @@ async function generateWithGLM(prompt: string, imageBase64?: string | null): Pro
         type: 'text',
         text: `Create a detailed scientific diagram structure for: "${prompt}". 
         You must return valid JSON format only with nodes and edges. 
+        
+        CRITICAL LAYOUT REQUIREMENTS:
+        - Each node has a width of 200px and height of 100px.
+        - Nodes must be spaced far enough apart to prevent overlap. Use row and col values that ensure:
+          * Horizontal spacing: adjacent nodes in different columns should have col values that differ by at least 1 (preferably 2-3 for clarity).
+          * Vertical spacing: adjacent nodes in different rows should have row values that differ by at least 1 (preferably 2 for clarity).
+          * Avoid placing nodes too close together - leave room for arrows to connect cleanly from node edges.
+        - Arrange nodes in a logical flow: top-to-bottom or left-to-right based on the process flow.
+        - Ensure arrows can connect cleanly from one node's edge to another node's edge without crossing through nodes.
+        
         Each node should have: id, label, icon (Lucide icon name), category (input/process/output/database/default), row, col, groupId (optional - nodes with same groupId belong to same group/subgraph).
         Each edge should have: from, to, label.
         If nodes belong to a logical group (like "工具集" containing multiple tools), assign them the same groupId.
+        When creating edges, ensure the from and to nodes are properly spaced to avoid visual clutter.
         Return the result as a JSON object.`
       }
     ]
@@ -274,9 +307,20 @@ async function generateWithMiniMax(prompt: string, imageBase64?: string | null):
     role: 'user',
     text: `Create a detailed scientific diagram structure for: "${prompt}". 
     Return JSON format with nodes and edges. 
+    
+    CRITICAL LAYOUT REQUIREMENTS:
+    - Each node has a width of 200px and height of 100px.
+    - Nodes must be spaced far enough apart to prevent overlap. Use row and col values that ensure:
+      * Horizontal spacing: adjacent nodes in different columns should have col values that differ by at least 1 (preferably 2-3 for clarity).
+      * Vertical spacing: adjacent nodes in different rows should have row values that differ by at least 1 (preferably 2 for clarity).
+      * Avoid placing nodes too close together - leave room for arrows to connect cleanly from node edges.
+    - Arrange nodes in a logical flow: top-to-bottom or left-to-right based on the process flow.
+    - Ensure arrows can connect cleanly from one node's edge to another node's edge without crossing through nodes.
+    
     Each node should have: id, label, icon (Lucide icon name), category (input/process/output/database/default), row, col, groupId (optional - nodes with same groupId belong to same group/subgraph).
     Each edge should have: from, to, label.
-    If nodes belong to a logical group (like "工具集" containing multiple tools), assign them the same groupId.`
+    If nodes belong to a logical group (like "工具集" containing multiple tools), assign them the same groupId.
+    When creating edges, ensure the from and to nodes are properly spaced to avoid visual clutter.`
   }];
 
   // MiniMax 图片处理需要单独处理
@@ -335,9 +379,20 @@ async function generateWithOpenAI(prompt: string, imageBase64?: string | null): 
         type: 'text',
         text: `Create a detailed scientific diagram structure for: "${prompt}". 
         You must return valid JSON format only with nodes and edges. 
+        
+        CRITICAL LAYOUT REQUIREMENTS:
+        - Each node has a width of 200px and height of 100px.
+        - Nodes must be spaced far enough apart to prevent overlap. Use row and col values that ensure:
+          * Horizontal spacing: adjacent nodes in different columns should have col values that differ by at least 1 (preferably 2-3 for clarity).
+          * Vertical spacing: adjacent nodes in different rows should have row values that differ by at least 1 (preferably 2 for clarity).
+          * Avoid placing nodes too close together - leave room for arrows to connect cleanly from node edges.
+        - Arrange nodes in a logical flow: top-to-bottom or left-to-right based on the process flow.
+        - Ensure arrows can connect cleanly from one node's edge to another node's edge without crossing through nodes.
+        
         Each node should have: id, label, icon (Lucide icon name), category (input/process/output/database/default), row, col, groupId (optional - nodes with same groupId belong to same group/subgraph).
         Each edge should have: from, to, label.
         If nodes belong to a logical group (like "工具集" containing multiple tools), assign them the same groupId.
+        When creating edges, ensure the from and to nodes are properly spaced to avoid visual clutter.
         Return the result as a JSON object.`
       }
     ]
@@ -421,11 +476,26 @@ function parseResponse(responseText: string): DiagramElement[] {
   const nodeMap = new Map<string, DiagramElement>();
 
   // 1. Convert Nodes to DiagramElements
+  // Pre-process to compact coordinates (remove empty rows/cols)
+  const uniqueRows = Array.from(new Set(nodes.map((n: any) => n.row))).sort((a: any, b: any) => a - b);
+  const uniqueCols = Array.from(new Set(nodes.map((n: any) => n.col))).sort((a: any, b: any) => a - b);
+
+  const rowMapping = new Map(uniqueRows.map((r, i) => [r, i]));
+  const colMapping = new Map(uniqueCols.map((c, i) => [c, i]));
+
+  const NODE_WIDTH = 200;
+  const NODE_HEIGHT = 100;
+  const GAP_X = 60; // Tighter horizontal gap
+  const GAP_Y = 50; // Tighter vertical gap
+
   nodes.forEach((node: any) => {
     const colorSet = COLORS[node.category as keyof typeof COLORS] || COLORS.default;
     
-    const x = START_X + (node.col * COL_WIDTH) + (Math.random() * 10); 
-    const y = START_Y + (node.row * ROW_HEIGHT) + (Math.random() * 10);
+    const r = rowMapping.get(node.row) ?? node.row;
+    const c = colMapping.get(node.col) ?? node.col;
+
+    const x = START_X + (c * (NODE_WIDTH + GAP_X)); 
+    const y = START_Y + (r * (NODE_HEIGHT + GAP_Y));
 
     const el: DiagramElement = {
       id: node.id || generateId(),

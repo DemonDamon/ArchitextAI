@@ -9,9 +9,10 @@ interface PropertiesPanelProps {
   deleteElement: () => void;
   onHistorySave: () => void;
   onClose?: () => void;
+  onCreateGroup?: () => void;
 }
 
-export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, elements, updateElement, deleteElement, onHistorySave, onClose }) => {
+export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, elements, updateElement, deleteElement, onHistorySave, onClose, onCreateGroup }) => {
   
   // Helper to update with history trigger
   const handleChange = (updates: Partial<DiagramElement>) => {
@@ -38,10 +39,15 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, eleme
     return Array.from(groupMap.entries()).map(([id, label]) => ({ id, label }));
   }, [elements]);
 
-  // 创建新分组
+  // 创建新分组 (使用传入的 onCreateGroup 回调，如果可用)
   const handleCreateGroup = () => {
-    const newGroupId = `group_${Date.now()}`;
-    handleChange({ groupId: newGroupId });
+    if (onCreateGroup) {
+      onCreateGroup();
+    } else {
+      // Fallback (legacy logic, only sets groupId on current element)
+      const newGroupId = `group_${Date.now()}`;
+      handleChange({ groupId: newGroupId });
+    }
   };
 
   // If no element is selected, do not render anything (remove empty state)
@@ -72,14 +78,16 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, eleme
       <div className="space-y-4">
         {/* Text Content */}
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-gray-500">Label / Text</label>
+          <label className="text-xs font-medium text-gray-500">
+            {element.type === ToolType.GROUP ? 'Group Label' : 'Label / Text'}
+          </label>
           <textarea
             value={element.text || ''}
             onFocus={() => onHistorySave()} 
             onChange={(e) => updateElement({ text: e.target.value }, false)} 
             onBlur={() => onHistorySave()}
             className="border rounded-md p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-y min-h-[60px]"
-            placeholder="Enter text..."
+            placeholder={element.type === ToolType.GROUP ? 'Enter group name...' : 'Enter text...'}
           />
         </div>
 
@@ -309,7 +317,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, eleme
         )}
 
         {/* Dimensions */}
-        {(element.type === ToolType.RECTANGLE || element.type === ToolType.CIRCLE) && (
+        {(element.type === ToolType.RECTANGLE || element.type === ToolType.CIRCLE || element.type === ToolType.GROUP) && (
              <div className="grid grid-cols-2 gap-4">
                 <div>
                     <label className="text-xs font-medium text-gray-500">Width</label>
@@ -334,8 +342,29 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ element, eleme
              </div>
         )}
 
-        {/* Group Assignment (for non-arrow elements) */}
-        {element.type !== ToolType.ARROW && (
+        {/* Line Style for GROUP elements */}
+        {element.type === ToolType.GROUP && (
+          <div className="border-t border-gray-100 pt-4 flex flex-col gap-2">
+            <label className="text-xs font-bold text-gray-700">Border Style</label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleChange({ lineStyle: LineStyle.SOLID })}
+                className={`flex-1 px-2 py-1 text-xs border rounded ${element.lineStyle === LineStyle.SOLID ? 'bg-blue-50 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-600'}`}
+              >
+                Solid
+              </button>
+              <button
+                onClick={() => handleChange({ lineStyle: LineStyle.DASHED })}
+                className={`flex-1 px-2 py-1 text-xs border rounded ${element.lineStyle === LineStyle.DASHED ? 'bg-blue-50 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-600'}`}
+              >
+                Dashed
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Group Assignment (for non-arrow, non-group elements) */}
+        {element.type !== ToolType.ARROW && element.type !== ToolType.GROUP && (
           <div className="border-t border-gray-100 pt-4 flex flex-col gap-2">
             <div className="flex justify-between items-center">
               <label className="text-xs font-bold text-gray-700">分组</label>

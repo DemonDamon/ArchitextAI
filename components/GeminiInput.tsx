@@ -5,11 +5,15 @@ import { DiagramElement, GenerationHistory } from '../types';
 
 interface GeminiInputProps {
   history?: GenerationHistory[];
+  onGenerationStart?: () => void; // Callback when generation starts (to clear canvas)
+  onGenerationEnd?: () => void; // Callback when generation ends (success or failure)
   onElementsGenerated: (elements: DiagramElement[], prompt: string, image: string | null) => void;
 }
 
 export const GeminiInput: React.FC<GeminiInputProps> = ({ 
   history = [], 
+  onGenerationStart,
+  onGenerationEnd,
   onElementsGenerated
 }) => {
   const [prompt, setPrompt] = useState('');
@@ -54,6 +58,11 @@ export const GeminiInput: React.FC<GeminiInputProps> = ({
 
     setLoading(true);
     setError(null);
+    
+    // Clear canvas immediately when generation starts
+    if (onGenerationStart) {
+      onGenerationStart();
+    }
 
     try {
       const newElements = await generateDiagramFromPrompt(prompt, image);
@@ -67,6 +76,10 @@ export const GeminiInput: React.FC<GeminiInputProps> = ({
       setError(errorMessage);
     } finally {
       setLoading(false);
+      // Reset generation state when generation ends (success or failure)
+      if (onGenerationEnd) {
+        onGenerationEnd();
+      }
     }
   };
 

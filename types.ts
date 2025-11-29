@@ -19,7 +19,13 @@ export enum LineStyle {
   DOTTED = 'DOTTED'
 }
 
-export type PortDirection = 'top' | 'right' | 'bottom' | 'left';
+export type PortDirection = 
+  | 'top' | 'right' | 'bottom' | 'left'
+  | 'top-start' | 'top-end'
+  | 'right-start' | 'right-end'
+  | 'bottom-start' | 'bottom-end'
+  | 'left-start' | 'left-end'
+  | 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left';
 
 export interface Point {
   x: number;
