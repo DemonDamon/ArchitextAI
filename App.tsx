@@ -748,9 +748,9 @@ const App: React.FC = () => {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold shadow-blue-200 shadow-lg">
-              P
+              A
             </div>
-            <h1 className="font-bold text-xl text-gray-800 tracking-tight">PaperPlot <span className="text-blue-600 font-normal">AI</span></h1>
+            <h1 className="font-bold text-xl text-gray-800 tracking-tight">Architext <span className="text-blue-600 font-normal">AI</span></h1>
           </div>
           
           <div className="h-6 w-px bg-gray-200 mx-2"></div>
