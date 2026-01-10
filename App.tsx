@@ -6,7 +6,8 @@ import { Canvas, CanvasRef } from './components/Canvas';
 import { GeminiInput } from './components/GeminiInput';
 import { DslEditorPanel } from './components/DslEditorPanel';
 import { DiagramElement, ToolType, GenerationHistory, LineStyle } from './types';
-import { FileImage, Trash2, CheckCircle2, AlertCircle, RotateCcw, RotateCw } from 'lucide-react';
+import { FileImage, Trash2, CheckCircle2, AlertCircle, RotateCcw, RotateCw, Sparkles } from 'lucide-react';
+import { autoLayout } from './services/layoutService';
 
 const STORAGE_KEY = 'paperplot-elements-v1';
 const HISTORY_STORAGE_KEY = 'paperplot-history-v1';
@@ -72,6 +73,9 @@ const App: React.FC = () => {
 
   // DSL Editor state
   const [dslEditorElementId, setDslEditorElementId] = useState<string | null>(null);
+
+  // Beautify layout state
+  const [isBeautifying, setIsBeautifying] = useState(false);
 
   // Load from local storage on mount
   useEffect(() => {
@@ -355,6 +359,33 @@ const App: React.FC = () => {
     const allIds = elements.filter(el => el.type !== ToolType.ARROW).map(el => el.id);
     setSelectedElementIds(allIds);
   }, [elements]);
+
+  // Beautify Layout - 一键美化布局
+  const handleBeautifyLayout = useCallback(async () => {
+    if (elements.length === 0) return;
+    
+    // 检查是否有节点（非箭头元素）
+    const hasNodes = elements.some(el => el.type !== ToolType.ARROW);
+    if (!hasNodes) return;
+
+    setIsBeautifying(true);
+    saveToHistory();
+
+    try {
+      const beautifiedElements = await autoLayout(elements);
+      setElements(beautifiedElements);
+      setSelectedElementIds([]);
+      
+      // 触发 Fit View
+      setTimeout(() => {
+        canvasRef.current?.fitView(beautifiedElements);
+      }, 100);
+    } catch (error) {
+      console.error('[App] Beautify layout failed:', error);
+    } finally {
+      setIsBeautifying(false);
+    }
+  }, [elements, saveToHistory]);
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -774,6 +805,23 @@ const App: React.FC = () => {
               <RotateCw size={18} />
             </button>
           </div>
+
+          <div className="h-6 w-px bg-gray-200"></div>
+
+          {/* Beautify Layout Button */}
+          <button
+            onClick={handleBeautifyLayout}
+            disabled={isBeautifying || elements.length === 0}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-purple-600 hover:bg-purple-50 rounded-md disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+            title="一键美化布局 - 使用 ELK 算法优化节点位置和连线"
+          >
+            {isBeautifying ? (
+              <div className="w-4 h-4 rounded-full border-2 border-purple-500 border-t-transparent animate-spin"></div>
+            ) : (
+              <Sparkles size={16} />
+            )}
+            美化布局
+          </button>
 
           {/* Autosave Indicator */}
           <div className="ml-4 flex items-center gap-1.5 px-3 py-1 bg-gray-50 rounded-full border border-gray-100">
