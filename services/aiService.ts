@@ -1,17 +1,18 @@
 import { DiagramElement, ToolType, LineType, LineStyle, AIProviderType } from "../types";
 import { getAIConfig, PROVIDER_PRESETS } from "./configService";
+import { layoutWithELK } from "./layoutService";
 
 // Helper to create a unique ID
 const generateId = () => `el_${Math.random().toString(36).substr(2, 9)}`;
 
-// Layout constants
-// Reduced spacing to make the diagram more compact
-const COL_WIDTH = 280; // Reduced from 350
-const ROW_HEIGHT = 160; // Reduced from 200
+// Layout constants (保留用于 fallback)
+const COL_WIDTH = 280;
+const ROW_HEIGHT = 160;
 const START_X = 60;
 const START_Y = 60;
 
-const COLORS = {
+// 导出颜色配置供 layoutService 使用
+export const COLORS = {
   input: { fill: "#eff6ff", stroke: "#3b82f6" }, // Blueish
   process: { fill: "#fdf2f8", stroke: "#db2777" }, // Pinkish
   output: { fill: "#f0fdf4", stroke: "#16a34a" }, // Greenish
@@ -149,7 +150,7 @@ async function generateWithGemini(
     }
   });
 
-  return parseResponse(response.text || "{}");
+  return await parseResponse(response.text || "{}");
 }
 
 // MiniMax 实现
@@ -214,7 +215,7 @@ async function generateWithMiniMax(
 
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content || '';
-  return parseResponse(content);
+  return await parseResponse(content);
 }
 
 // OpenAI 实现
@@ -319,7 +320,7 @@ async function generateWithOpenAI(
       throw new Error('API 响应中没有 content 字段');
     }
     
-    return parseResponse(content);
+    return await parseResponse(content);
   } catch (error) {
     if (error instanceof TypeError && error.message.includes('fetch')) {
       console.error(`[PaperPlot AI] 网络请求失败:`, error);
@@ -352,7 +353,7 @@ export function buildChatCompletionsUrl(baseUrl?: string): string {
   return `${url}/chat/completions`;
 }
 
-function parseResponse(responseText: string): DiagramElement[] {
+async function parseResponse(responseText: string): Promise<DiagramElement[]> {
   let rawData: any;
   try {
     rawData = JSON.parse(responseText);
@@ -371,18 +372,34 @@ function parseResponse(responseText: string): DiagramElement[] {
 
   if (nodes.length === 0 && edges.length === 0) {
     console.warn('[PaperPlot AI] No nodes or edges found in AI response:', rawData);
-    // If it's not in the expected format, try to find any array that might be elements
     const possibleElements = Object.values(rawData).find(v => Array.isArray(v) && v.length > 0);
     if (possibleElements) {
        console.log('[PaperPlot AI] Found alternative elements array, attempting to use it.');
     }
+    return [];
   }
 
+  // 使用 ELK.js 进行专业的分层布局
+  try {
+    console.log('[PaperPlot AI] Using ELK.js for layout optimization...');
+    const layoutedElements = await layoutWithELK(nodes, edges, COLORS);
+    console.log('[PaperPlot AI] ELK layout completed, elements:', layoutedElements.length);
+    return layoutedElements;
+  } catch (layoutError) {
+    console.warn('[PaperPlot AI] ELK layout failed, falling back to simple grid layout:', layoutError);
+    // Fallback 到简单的网格布局
+    return fallbackGridLayout(nodes, edges);
+  }
+}
+
+/**
+ * 简单的网格布局作为 fallback
+ */
+function fallbackGridLayout(nodes: any[], edges: any[]): DiagramElement[] {
   const finalElements: DiagramElement[] = [];
   const nodeMap = new Map<string, DiagramElement>();
 
-  // 1. Convert Nodes to DiagramElements
-  // Pre-process to compact coordinates (remove empty rows/cols)
+  // Pre-process to compact coordinates
   const uniqueRows = Array.from(new Set(nodes.map((n: any) => n.row))).sort((a: any, b: any) => a - b);
   const uniqueCols = Array.from(new Set(nodes.map((n: any) => n.col))).sort((a: any, b: any) => a - b);
 
@@ -391,8 +408,8 @@ function parseResponse(responseText: string): DiagramElement[] {
 
   const NODE_WIDTH = 200;
   const NODE_HEIGHT = 100;
-  const GAP_X = 60; // Tighter horizontal gap
-  const GAP_Y = 50; // Tighter vertical gap
+  const GAP_X = 60;
+  const GAP_Y = 50;
 
   nodes.forEach((node: any) => {
     const colorSet = COLORS[node.category as keyof typeof COLORS] || COLORS.default;
@@ -408,22 +425,22 @@ function parseResponse(responseText: string): DiagramElement[] {
       type: ToolType.RECTANGLE,
       x: x,
       y: y,
-      width: 200, 
-      height: 100, 
+      width: NODE_WIDTH, 
+      height: NODE_HEIGHT, 
       text: node.label,
       icon: node.icon,
       strokeColor: colorSet.stroke,
       fillColor: colorSet.fill,
       strokeWidth: 2,
       fontSize: 14,
-      groupId: node.groupId  // 支持分组
+      groupId: node.groupId
     };
     
     finalElements.push(el);
     nodeMap.set(node.id, el);
   });
 
-  // 2. Convert Edges
+  // Convert Edges
   edges.forEach((edge: any) => {
     const fromNode = nodeMap.get(edge.from);
     const toNode = nodeMap.get(edge.to);
@@ -442,7 +459,7 @@ function parseResponse(responseText: string): DiagramElement[] {
         fillColor: "transparent",
         strokeWidth: 2,
         text: edge.label || "",
-        lineType: LineType.STEP, // 默认使用 STEP 类型
+        lineType: LineType.STEP,
         lineStyle: LineStyle.SOLID,
         markerEnd: true
       };
