@@ -10,6 +10,8 @@
 ## Key Features
 
 - **AI-Powered Generation**: Instantly create diagrams from text descriptions or image uploads.
+- **Auto Layout with ELK.js**: Professional layered layout algorithm for optimal node positioning and edge routing.
+- **One-Click Beautify**: Automatically optimize diagram layout and connection paths with a single click.
 - **Advanced Infographics**: Utilizes `@antv/infographic` to generate a wide variety of professional infographics, including:
   - Layered Architecture Diagrams (`hierarchy-structure`)
   - Flow Timelines (`sequence-color-snake-steps-horizontal-icon-line`)
@@ -21,7 +23,7 @@
 - **Element Grouping**: Group related elements together for better organization.
 - **Persistent Workspace**: Your work is automatically saved to local storage.
 - **History Control**: Full support for undo and redo actions.
-- **High-Quality Export**: Export your diagrams as clean, scalable SVG files.
+- **High-Quality Export**: Export your diagrams as SVG or PNG files.
 - **Multi-Provider AI Support**: Flexible integration with various AI models, including:
   - Gemini
   - OpenAI
@@ -32,17 +34,25 @@
 
 ## Quick Start
 
-1.  **Install dependencies:**
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/DemonDamon/ArchitextAI.git
+    cd ArchitextAI
+    ```
+
+2.  **Install dependencies:**
     ```bash
     npm install
     ```
 
-2.  **Run the development server:**
+3.  **Run the development server:**
     ```bash
     npm run dev
     ```
 
-3.  Open your browser and navigate to `http://localhost:5173` (or the port specified in your terminal).
+4.  Open your browser and navigate to `http://localhost:3001/` (or the port specified in your terminal).
+
+5.  **(Optional)** Configure your AI provider by clicking the settings icon in the AI Generator panel, or create a `.env.local` file.
 
 ## Configuration
 
@@ -77,15 +87,27 @@ You can configure any of the following providers by setting `VITE_AI_PROVIDER` a
 - **Styling**: Tailwind CSS
 - **Icons**: Lucide React
 - **Infographics**: `@antv/infographic`
+- **Auto Layout**: ELK.js (Eclipse Layout Kernel)
 
 ## Project Structure
 
 ```
-/src
-├── components/   # Core React components (Canvas, Toolbar, etc.)
-├── services/     # AI service layer (multi-provider logic, infographic generation)
-├── types.ts      # TypeScript type definitions
-└── App.tsx       # Main application component and state management
+ArchitextAI/
+├── components/       # Core React components
+│   ├── Canvas.tsx        # Main drawing canvas with smart connections
+│   ├── Toolbar.tsx       # Drawing tools sidebar
+│   ├── PropertiesPanel.tsx   # Element property editor
+│   ├── GeminiInput.tsx       # AI generator panel
+│   ├── InfographicRenderer.tsx   # Infographic rendering
+│   └── DslEditorPanel.tsx    # DSL code editor
+├── services/         # Service layer
+│   ├── aiService.ts      # AI diagram generation (multi-provider)
+│   ├── layoutService.ts  # ELK.js auto-layout engine
+│   ├── infographicService.ts # Infographic DSL generation
+│   └── configService.ts  # AI provider configuration
+├── types.ts          # TypeScript type definitions
+├── App.tsx           # Main application component
+└── index.tsx         # Application entry point
 ```
 
 ## License
