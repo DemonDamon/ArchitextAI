@@ -509,7 +509,7 @@ async function* generateWithOpenAICompatible(
   prompt: string,
   imageBase64?: string | null
 ): AsyncGenerator<string> {
-  const baseUrl = buildChatCompletionsUrl(config);
+  const baseUrl = buildChatCompletionsUrl(config.baseUrl);
   
   const messages: any[] = [
     { role: "system", content: INFOGRAPHIC_SYSTEM_PROMPT },
