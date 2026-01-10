@@ -1,6 +1,22 @@
 # Changelog
 
-## [Unreleased] - January 9, 2026
+## [1.1.0] - January 10, 2026
+
+### Added
+- **DSL Editor Panel**: New side panel for real-time DSL editing with auto-sync
+  - Auto-sync mode with 500ms debounce for live preview
+  - Manual sync mode for controlled updates
+  - Keyboard shortcuts: `Ctrl+S` to save, `Esc` to close
+  - Copy to clipboard, reset to original, unsaved changes indicator
+- **Edit DSL Code button** in Properties Panel for INFOGRAPHIC elements
+
+### Fixed
+- CSS centering for infographic content display
+- Improved container styling for better visual alignment
+
+---
+
+## [1.0.0] - January 9, 2026
 
 ### Added
 - **`hierarchy-structure` Template Support**: Added full support for the `hierarchy-structure` infographic template from `@antv/infographic`. This enables the generation of professional layered architecture diagrams.
